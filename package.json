@@ -1,0 +1,14 @@
+{
+  "name": "g-over-world",
+  "version": "1.0.0",
+  "description": "FF ADVENTURE 계열 2d6 대항판정 MS 파일럿 육성 시뮬레이션",
+  "scripts": {
+    "fetch": "node src/fetch-roster.mjs",
+    "build": "node build.mjs",
+    "serve": "node serve.mjs"
+  },
+  "devDependencies": {
+    "sharp": "^0.35.4"
+  },
+  "private": true
+}
