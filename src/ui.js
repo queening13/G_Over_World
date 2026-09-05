@@ -8,6 +8,26 @@ function gauge(cls, cur, max, label) {
   return '<div class="gg"><i class="' + w + '" style="width:' + (r * 100) + '%"></i><span>' + label + '</span></div>';
 }
 
+/* 이미지 확대 (#10) — 초상화를 원본 크기로 띄운다.
+   확대 대상에는 data-zoom 을 붙이고, 클릭은 문서 전체에 한 번만 위임한다. */
+function openZoom(src, cap) {
+  const z = $('zoom'); if (!z) return;
+  z.innerHTML = '<div class="zbox"><img src="' + src + '" alt="">' +
+    '<div class="zcap">' + esc(cap || '') + '<span class="dm"> — 아무 곳이나 눌러 닫기</span></div></div>';
+  z.hidden = false;
+}
+document.addEventListener('click', ev => {
+  const z = $('zoom');
+  if (z && !z.hidden) { z.hidden = true; z.innerHTML = ''; return; }
+  const t = ev.target.closest ? ev.target.closest('[data-zoom]') : null;
+  if (t) { ev.preventDefault(); ev.stopPropagation(); openZoom(t.dataset.zoom, t.dataset.zcap || ''); }
+}, true);
+document.addEventListener('keydown', ev => {
+  const z = $('zoom');
+  if (ev.key === 'Escape' && z && !z.hidden) { z.hidden = true; z.innerHTML = ''; }
+});
+const zoomAttr = B => ' data-zoom="' + B.img + '" data-zcap="' + esc(B.nm) + '" title="클릭하면 크게 봅니다"';
+
 /* 표시 크기에 맞는 이미지를 고른다.
    썸네일은 128x128 이라 작은 칸에서만 쓰고, 큰 칸에는 936x803 초상화 원본을 쓴다. */
 const picFor = (B, cls) => (cls === 'l' || cls === 'xl') ? B.img : (B.th || B.img);
@@ -39,14 +59,16 @@ const statLine = s => '<div class="stats"><span>HP <b>' + cm(s.hp != null ? s.hp
 const wepLine = B => B.w.map(w => w.n + '(' + cm(w.pw[w.pw.length - 1]) + ')').join(' · ') || '무장 없음';
 
 /* 무장 한 줄 설명 — 거리축으로 환산한 사거리를 함께 보여준다 (#12) */
-function wepDetail(w, pw, awk) {
+function wepDetail(w, pw, awk, eff) {
+  const mel = wIsMelee(w), aw = wIsAwk(w);
   const mn = Math.max(1, (w.mn | 0) * RANGE_MUL - 1);
   let mx = Math.max(mn, (w.mx | 0) * RANGE_MUL);
-  const aw = wIsAwk(w);
+  if (eff) mx += mel ? eff.rangeM : eff.rangeS;          /* 사격·격투 전문가 */
   if (aw) mx = Math.min(AWK_RANGE_CAP, mx + Math.floor((awk | 0) / 100));
-  return '위력 ' + cm(pw) + ' · ' + (wIsMelee(w) ? '격투' : '사격') + ' · ' + esc(w.at || '-') +
+  const en = eff ? Math.max(0, Math.round((w.en | 0) * (1 - (mel ? eff.enM : eff.enS)))) : (w.en | 0);
+  return '위력 ' + cm(pw) + ' · ' + (mel ? '격투' : '사격') + ' · ' + esc(w.at || '-') +
     (aw ? ' <span class="pk">〔각성〕</span>' : '') +
-    (w.en ? ' · EN ' + w.en : '') + (w.am ? ' · 탄 ' + w.am : '') +
+    (en ? ' · EN ' + en : '') + (w.am ? ' · 탄 ' + w.am : '') +
     ' · 거리 <b class="cy">' + mn + '~' + mx + '</b>';
 }
 
@@ -68,6 +90,7 @@ function allocTable(vals, remain, tag) {
 function bindAlloc(tag, get, set) {
   document.querySelectorAll('[data-al="' + tag + '"]').forEach(b => b.onclick = () => {
     const k = b.dataset.k, n = +b.dataset.n, st = get();
+    if (k === 'awk' && g && awkLocked()) return;      /* 올드타입 — 각성 상승 불가 */
     const step = n > 0 ? Math.min(n, st.remain, STAT_MAX - st.vals[k]) : Math.max(n, -st.spent[k]);
     if (!step) return;
     set(k, step);
@@ -80,6 +103,7 @@ function renderLeft() {
   const host = $('lft');
   if (!g) { host.innerHTML = '<table class="tb"><caption>【 STATUS 】</caption><tr><td>등록된 파일럿이 없습니다.</td></tr></table>'; return; }
   const v = cur(), s = uStat(v), B = s.B;
+  const E = effStats(B);              /* 스킬을 반영한 실효 능력치 */
 
   let h = '<table class="tb"><caption>【 파일럿 】</caption>' +
     '<tr><th>이름</th><td class="cy">' + esc(g.name) + '</td></tr>' +
@@ -94,16 +118,26 @@ function renderLeft() {
   h += '<table class="tb grid"><caption>【 능력치 】' +
     (g.pt > 0 ? '<span class="ye" style="float:right">미배분 ' + g.pt + 'pt</span>' :
       '<span class="dm" style="float:right">합계 ' + cm(statTotal()) + '</span>') + '</caption><tr>';
+  const cell = k => {
+    const b = g.st[k], f = E.st[k], d = f - b;
+    return '<td class="' + (k === 'awk' && f >= AWK_FORESEE ? 'pk' : b >= 400 ? 'ye' : '') + '">' + b +
+      (d ? '<span class="' + (d > 0 ? 'li' : 'rd') + ' eff">' + (d > 0 ? '+' : '') + d + '</span>' : '') + '</td>';
+  };
   STK.slice(0, 3).forEach(k => h += '<th>' + STN[k] + '</th>'); h += '</tr><tr>';
-  STK.slice(0, 3).forEach(k => h += '<td class="' + (g.st[k] >= 400 ? 'ye' : '') + '">' + g.st[k] + '</td>'); h += '</tr><tr>';
+  STK.slice(0, 3).forEach(k => h += cell(k)); h += '</tr><tr>';
   STK.slice(3).forEach(k => h += '<th>' + STN[k] + '</th>'); h += '</tr><tr>';
-  STK.slice(3).forEach(k => h += '<td class="' + (k === 'awk' && g.st.awk >= AWK_FORESEE ? 'pk' : g.st[k] >= 400 ? 'ye' : '') + '">' + g.st[k] + '</td>');
+  STK.slice(3).forEach(k => h += cell(k));
   h += '</tr></table>';
-  if (g.st.awk >= AWK_FORESEE) h += '<div class="note pk2">※ <b>미래 예측</b> 가능 — 각성 ' + g.st.awk + '. 매 판정 5%로 절대 명중/절대 회피.</div>';
-  else if (g.st.awk < 1) h += '<div class="note">※ 각성 0 — <b>각성 무장을 사용할 수 없습니다.</b></div>';
+  if ((g.eq || []).length) h += '<div class="skline">' + g.eq.map(k =>
+    '<b>' + esc(PSKMAP[k].n) + (PSKMAP[k].nolv ? '' : ' <i>Lv' + pskLv(k) + '</i>') + '</b>').join('') + '</div>';
+  if (E.st.awk >= AWK_FORESEE) h += '<div class="note pk2">※ <b>미래 예측</b> 가능 — 각성 ' + E.st.awk + '. 매 판정 5%로 절대 명중/절대 회피.</div>';
+  else if (E.st.awk < 1) h += '<div class="note">※ 각성 0 — <b>각성 무장을 사용할 수 없습니다.</b></div>';
+  h += '<div class="note">※ 패널티 경감 <b>' + Math.round((1 - E.pen) * 100) + '%</b>' +
+    ' · HP ' + Math.round(GUTS_HP * 100) + '% 이하 저력 발동률 <b>' + (gutsP(E.st.spi) * 100).toFixed(1) + '%</b>/턴</div>';
 
-  h += '<table class="tb"><caption>【 탑승기 】' + (s.modSum ? '<span class="dm" style="float:right">개조 ' + s.modSum + '단</span>' : '') + '</caption>' +
-    '<tr><td colspan="2" class="pic"><img class="ui l" src="' + B.img + '" alt="">' +
+  h += '<table class="tb"><caption>【 탑승기 】<span class="dm" style="float:right">Lv ' + v.ulv +
+    (s.modSum ? ' · 개조 ' + s.modSum + '단' : '') + '</span></caption>' +
+    '<tr><td colspan="2" class="pic"><img class="ui l zoomable" src="' + B.img + '" alt=""' + zoomAttr(B) + '>' +
     '<div class="cy nmL">' + esc(B.nm) + '</div>' +
     '<div class="dm sm">' + esc(B.mdl || '') + '</div>' +
     '<div class="dm sm">' + esc(B.sr || '') + (B.lg ? ' · 대형' : '') + '</div></td></tr>' +
@@ -114,16 +148,19 @@ function renderLeft() {
     '<tr><th>기동</th><td>' + cm(s.mob) + '</td></tr>' +
     '<tr><th>색적</th><td>' + cm(s.sct) + '</td></tr>' +
     '<tr><th>지형 적성</th><td>' + terLine(v, true) + '</td></tr>' +
+    '<tr><th>기체 EXP</th><td>' + (v.ulv >= ULV_MAX ? '<span class="ye">MAX</span>' :
+      gauge('ex', v.uexp, uExpNeed(v.ulv), cm(v.uexp) + ' / ' + cm(uExpNeed(v.ulv)))) +
+    (v.upt > 0 ? '<div class="ye sm">미배분 ' + v.upt + 'pt — 【개조】</div>' : '') + '</td></tr>' +
     '</table>';
 
-  h += '<table class="tb"><caption>【 병장 】</caption>';
+  h += '<table class="tb"><caption>【 무장 】</caption>';
   if (!B.w.length) h += '<tr><td class="dm">무장 없음</td></tr>';
   B.w.forEach((w, i) => {
     const lv = (v.wl && v.wl[i]) || 1;
-    const lock = wIsAwk(w) && g.st.awk < 1;
+    const lock = wIsAwk(w) && E.st.awk < 1;
     h += '<tr><td style="width:100%">' + esc(w.n) + ' <span class="ye">Lv' + lv + '</span>' +
       (lock ? ' <span class="rd">사용 불가</span>' : '') +
-      '<div class="dm sm">' + wepDetail(w, wpowOf(v, i), g.st.awk) + '</div></td></tr>';
+      '<div class="dm sm">' + wepDetail(w, wpowOf(v, i), E.st.awk, E.e) + '</div></td></tr>';
   });
   h += '</table>';
 
@@ -138,17 +175,25 @@ function renderLeft() {
 
 /* ---------------- 커맨드 ---------------- */
 const CMDS = [['main', '상황실'], ['train', '훈련'], ['sortie', '출격'], ['repair', '정비'],
-['mod', '개조'], ['market', '암시장'], ['hangar', '격납고'], ['book', '도감'], ['log', '기록']];
+['mod', '개조'], ['shop', '상점'], ['market', '암시장'], ['hangar', '격납고'], ['book', '도감'], ['log', '기록']];
 function renderCmd() {
   const host = $('cmdbar');
   if (!g) { host.innerHTML = ''; return; }
   let h = '';
   CMDS.forEach(c => h += '<button class="cbtn' + (S.view === c[0] ? ' on' : '') + '" data-v="' + c[0] + '"' +
-    (S.busy ? ' disabled' : '') + '>【' + c[1] + '】' + (c[0] === 'train' && g.pt > 0 ? '<small class="ye"> ' + g.pt + 'pt</small>' : '') + '</button>');
+    (S.busy ? ' disabled' : '') + '>【' + c[1] + '】' +
+    (c[0] === 'train' && g.pt > 0 ? '<small class="ye"> ' + g.pt + 'pt</small>' : '') +
+    (c[0] === 'mod' && cur().upt > 0 ? '<small class="ye"> ' + cur().upt + 'pt</small>' : '') +
+    (c[0] === 'shop' && (g.orders || []).length ? '<small class="cy"> 발주 ' + g.orders.length + '</small>' : '') +
+    '</button>');
   h += '<span style="flex:1"></span><button class="cbtn" data-next="1"' + (S.busy ? ' disabled' : '') +
     '>【다음 날】<small> AP ' + g.ap + '/' + g.apMax + '</small></button>';
   host.innerHTML = h;
-  host.querySelectorAll('[data-v]').forEach(b => b.onclick = () => { S.view = b.dataset.v; S.msg = null; S.res = null; renderAll(); });
+  host.querySelectorAll('[data-v]').forEach(b => b.onclick = () => {
+    S.view = b.dataset.v; S.msg = null; S.res = null;
+    resetTrAlloc(); resetUAlloc();          /* 확정하지 않은 배분은 화면을 옮기면 버린다 */
+    renderAll();
+  });
   const nb = host.querySelector('[data-next]'); if (nb) nb.onclick = nextDay;
 }
 
@@ -156,7 +201,7 @@ function renderCmd() {
 function renderMain() {
   const host = $('mainf');
   if (!g) { host.innerHTML = viewNew(); bindNew(); return; }
-  const map = { train: viewTrain, sortie: viewSortie, battle: viewBattle, repair: viewRepair, mod: viewMod, market: viewMarket, hangar: viewHangar, book: viewBook, log: viewLog };
+  const map = { train: viewTrain, sortie: viewSortie, battle: viewBattle, repair: viewRepair, mod: viewMod, shop: viewShop, market: viewMarket, hangar: viewHangar, book: viewBook, log: viewLog };
   host.innerHTML = (map[S.view] || viewMain)();
   bindMain();
   const lg = $('blog'); if (lg) lg.scrollTop = lg.scrollHeight;
@@ -250,6 +295,8 @@ function viewMain() {
 }
 
 /* ---------------- 훈련 ---------------- */
+/* 올드타입을 장착하면 각성은 0 고정 — 훈련도 포인트 배분도 막는다 (#15) */
+const awkLocked = () => (g.eq || []).indexOf('ot') >= 0;
 let trAlloc = null;
 const trSpent = () => STK.reduce((a, k) => a + (trAlloc ? trAlloc[k] : 0), 0);
 function resetTrAlloc() { trAlloc = {}; STK.forEach(k => trAlloc[k] = 0); }
@@ -275,12 +322,14 @@ function viewTrain() {
   }
   h += '<p class="lead">항목을 골라 행동력 ' + TRAIN_AP + '을 소모합니다. <b>능력치 상한은 없습니다.</b> 다만 수치가 오를수록 성공률이 급격히 떨어지고, <b>400 이상은 1% 고정</b>입니다.</p>';
   if (g.ap <= 0) h += '<div class="note">※ <b>행동력이 부족합니다.</b></div>';
+  if (awkLocked()) h += '<div class="note">※ <b>올드타입</b> 장착 중 — 각성은 0으로 고정되며 훈련·배분이 잠깁니다.</div>';
   h += '<div class="pick">';
   STK.forEach(k => {
-    const t = trainTier(g.st[k]), dis = g.ap <= 0;
+    const t = trainTier(g.st[k]), lock = k === 'awk' && awkLocked(), dis = g.ap <= 0 || lock;
     h += (dis ? '<div class="dis">' : '<button data-tr="' + k + '">') +
       '<span class="l1"><span class="nm">' + STN[k] + ' 훈련</span>' +
-      '<span class="cost">현재 ' + g.st[k] + ' / 성공률 ' + Math.round(t.p * 100) + '%</span></span>' +
+      '<span class="cost">' + (lock ? '<span class="rd">올드타입 — 잠김</span>' :
+        '현재 ' + g.st[k] + ' / 성공률 ' + Math.round(t.p * 100) + '%') + '</span></span>' +
       '<span class="l2">' + STAT_DESC[k] + ' <b>성공 시 +' + t.up + '</b></span>' + (dis ? '</div>' : '</button>');
   });
   h += '</div>';
@@ -289,22 +338,48 @@ function viewTrain() {
     TRAIN_TIER.map(t => '<th>' + t.lo + '~</th>').join('') + '</tr><tr>' +
     TRAIN_TIER.map(t => '<td>' + Math.round(t.p * 100) + '%</td>').join('') + '</tr></table>';
 
-  /* 캐릭터 스킬 상점 (#8) */
-  h += '<h2 class="sec">【 스킬 습득 】<em>자금 소모</em></h2>';
-  if (!CSKILL.length) {
-    h += '<div class="note">※ 습득 가능한 스킬이 아직 등록되지 않았습니다. <b>추후 추가 예정</b>입니다.</div>';
-  } else {
+  /* 파일럿 스킬 (#15) — 장착 슬롯 + 습득/레벨업 상점 */
+  h += '<h2 class="sec">【 파일럿 스킬 】<em>장착 ' + (g.eq || []).length + ' / ' + PSK_SLOT + '</em></h2>';
+  h += '<div class="note">※ 장착은 최대 <b>' + PSK_SLOT + '개</b>입니다. ' +
+    '<b>뉴타입 · 강화인간 · 올드타입 · SEED · 코디네이터 · 이노베이터 · 이노베이드</b>는 ' +
+    '출신 계통이라 <b>서로 중복 장착할 수 없습니다.</b></div>';
+  if ((g.eq || []).length) {
     h += '<div class="pick">';
-    CSKILL.forEach(sk => {
-      const own = g.sk.indexOf(sk.k) >= 0, poor = sk.c > g.cash, dis = own || poor;
-      h += (dis ? '<div class="dis">' : '<button data-sk="' + sk.k + '">') +
-        '<span class="l1"><span class="nm">' + esc(sk.n) + '</span><span class="cost">' +
-        (own ? '<span class="li">습득함</span>' : (poor ? '<span class="rd">' : '') + cm(sk.c) + ' C' + (poor ? '</span>' : '')) +
-        '</span></span><span class="l2">' + esc(sk.d) + '</span>' + (dis ? '</div>' : '</button>');
+    g.eq.forEach(k => {
+      const K = PSKMAP[k];
+      h += '<button data-uneq="' + k + '"><span class="l1"><span class="nm ye">▶ ' + esc(K.n) +
+        (K.nolv ? '' : ' <span class="ye">Lv' + pskLv(k) + '</span>') + '</span>' +
+        '<span class="cost"><span class="rd">해제</span></span></span>' +
+        '<span class="l2">' + esc(K.d) + '</span></button>';
     });
     h += '</div>';
   }
-  return h;
+  h += '<div class="pick">';
+  PSKILL.forEach(K => {
+    const lv = pskLv(K.k), on = pskEquipped(K.k);
+    const maxed = K.nolv ? lv >= 1 : lv >= PSK_MAXLV;
+    const c = pskCost(lv), poor = c > g.cash;
+    const slotFull = (g.eq || []).length >= PSK_SLOT;
+    const clash = K.g && (g.eq || []).some(x => x !== K.k && PSKMAP[x] && PSKMAP[x].g === K.g);
+    const canEq = lv > 0 && !on && !slotFull && !clash;
+    const why = maxed ? '<span class="li">MAX</span>' :
+      (poor ? '<span class="rd">' : '') + cm(c) + ' C' + (poor ? '</span>' : '');
+    h += '<div class="skrow' + (on ? ' selrow' : '') + '">' +
+      '<span class="l1"><span class="nm">' + esc(K.n) +
+      (lv > 0 ? ' <span class="ye">Lv' + lv + (K.nolv ? '' : '/' + PSK_MAXLV) + '</span>' : ' <span class="dm">미습득</span>') +
+      (K.g ? ' <span class="pk sm">〔출신〕</span>' : '') + '</span>' +
+      '<span class="cost">' + why + '</span></span>' +
+      '<span class="l2">' + esc(K.d) + '</span>' +
+      '<span class="row-btn" style="margin-top:3px">' +
+      (maxed ? '' : '<button class="btn" data-sklv="' + K.k + '"' + (poor ? ' disabled' : '') + '>【' +
+        (lv ? 'Lv' + (lv + 1) + '로 강화' : '습득') + '】</button>') +
+      (on ? '<button class="btn" data-uneq="' + K.k + '">【장착 해제】</button>' :
+        '<button class="btn p" data-eq="' + K.k + '"' + (canEq ? '' : ' disabled') + '>【장착】' +
+        (lv <= 0 ? ' <span class="dm">미습득</span>' : clash ? ' <span class="dm">출신 중복</span>' :
+         slotFull ? ' <span class="dm">슬롯 없음</span>' : '') + '</button>') +
+      '</span></div>';
+  });
+  return h + '</div>';
 }
 function doTrain(k) {
   if (g.ap <= 0) return;
@@ -404,9 +479,39 @@ function viewRepair() {
 }
 
 /* ---------------- 개조 ---------------- */
+let uAlloc = null;
+const uSpent = () => UIK.reduce((a, k) => a + (uAlloc ? uAlloc[k] : 0), 0);
+function resetUAlloc() { uAlloc = {}; UIK.forEach(k => uAlloc[k] = 0); }
+
 function viewMod() {
   const v = cur(), s = uStat(v), B = s.B;
+  if (!uAlloc) resetUAlloc();
   let h = '<h2 class="sec">【 개조 】<em>행동력 소모 없음</em></h2>' + msgBox();
+
+  /* 기체 레벨 강화 포인트 (#1~#3) */
+  h += '<h2 class="sec">【 기체 강화 】<em>Lv ' + v.ulv + ' / ' + ULV_MAX + '</em></h2>';
+  h += '<p class="lead">출격한 탑승기는 파일럿과 함께 EXP를 얻습니다. 레벨업 1회당 <b>' + ULVUP_PT +
+    '포인트</b>가 지급되며, <b>HP는 1포인트당 +100</b>, 나머지는 1포인트당 +1 상승합니다.</p>';
+  if (v.upt > 0 || uSpent() > 0) {
+    h += '<table class="tb"><caption>【 강화 포인트 】<span class="dm" style="float:right">잔여 <b class="ye">' +
+      (v.upt - uSpent()) + '</b></span></caption>';
+    UIK.forEach(k => {
+      const now = uBase(v, k) + uAlloc[k] * UINV_STEP[k], full = now >= UCAP[k];
+      h += '<tr><th>' + UIN[k] + '</th><td><span class="alv">' + cm(now) + '</span>' +
+        '<button class="sbtn" data-ua="' + k + '" data-n="-10">−10</button>' +
+        '<button class="sbtn" data-ua="' + k + '" data-n="-1">−1</button>' +
+        '<button class="sbtn" data-ua="' + k + '" data-n="1"' + (full ? ' disabled' : '') + '>+1</button>' +
+        '<button class="sbtn" data-ua="' + k + '" data-n="10"' + (full ? ' disabled' : '') + '>+10</button>' +
+        '<span class="dm sd">1pt = +' + UINV_STEP[k] + ' · 상한 ' + cm(UCAP[k]) +
+        (full ? ' <span class="li">도달</span>' : '') + '</span></td></tr>';
+    });
+    h += '</table><div class="row-btn"><button class="btn" id="bUaCancel">【되돌리기】</button>' +
+      '<button class="btn p" id="bUaOK"' + (uSpent() <= 0 ? ' disabled' : '') + '>【강화 확정 ' + uSpent() + 'pt】</button></div>';
+  } else {
+    h += '<div class="note">※ 미배분 강화 포인트가 없습니다. 출격해서 기체 EXP를 쌓으십시오. ' +
+      '<b>다음 레벨까지 ' + cm(Math.max(0, uExpNeed(v.ulv) - v.uexp)) + ' EXP</b></div>';
+  }
+  h += '<hr class="sep">';
   h += '<p class="lead">탑승기 <b>' + esc(B.nm) + '</b>을(를) 강화합니다. 각 항목 최대 <b>' + MODMAX + '단</b>, 1단당 기본 제원의 <b>5%</b>가 가산됩니다. 개조 내역은 기체별로 관리됩니다.</p>';
   h += '<div class="pick">';
   Object.keys(MOD).forEach(k => {
@@ -420,17 +525,19 @@ function viewMod() {
   });
   h += '</div>';
 
-  /* 지형 적성 파츠 (#16) */
-  const used = (v.pt || []).length, pc = partCost(B);
-  h += '<h2 class="sec">【 지형 파츠 】<em>슬롯 ' + used + ' / ' + PART_SLOT + '</em></h2>';
-  h += '<div class="note">※ 파츠 1개당 해당 지형 적성이 <b>1단계</b> 올라갑니다(× → △ → ○). 같은 파츠를 두 개 달면 ×에서 ○까지 끌어올릴 수 있습니다. 탈거는 무상이나 대금은 돌아오지 않습니다.</div>';
+  /* 파츠 장착 (#7 · #16) — 구입은 【상점】, 여기서는 재고에서 꺼내 단다 */
+  const used = (v.pt || []).length;
+  h += '<h2 class="sec">【 파츠 】<em>슬롯 ' + used + ' / ' + PART_SLOT + '</em></h2>';
+  h += '<div class="note">※ 파츠는 <b>【상점】</b>에서 구입해 창고에 넣어 두고 여기서 장착합니다. ' +
+    '지형 파츠 1개당 해당 적성이 <b>1단계</b> 올라갑니다(× → △ → ○). 탈거하면 창고로 돌아갑니다.</div>';
   h += '<div style="margin-bottom:6px">현재 적성 ' + terLine(v, true) + '</div>';
   h += '<div class="pick">';
   TER_ORDER.forEach(k => {
-    const now = adaptOf(v, k), full = now >= 2, noSlot = used >= PART_SLOT, poor = pc > g.cash;
-    const dis = full || noSlot || poor;
+    const now = adaptOf(v, k), full = now >= 2, noSlot = used >= PART_SLOT;
+    const stock = (g.parts && g.parts[k]) | 0, none = stock <= 0;
+    const dis = full || noSlot || none;
     const why = full ? '<span class="li">○ 달성</span>' : noSlot ? '<span class="rd">슬롯 없음</span>' :
-      (poor ? '<span class="rd">' : '') + cm(pc) + ' C' + (poor ? '</span>' : '');
+      none ? '<span class="rd">재고 0</span>' : '<span class="li">창고 ' + stock + '개</span>';
     h += (dis ? '<div class="dis">' : '<button data-part="' + k + '">') +
       '<span class="l1"><span class="nm">' + PARTS[k].n + '</span><span class="cost">' + why + '</span></span>' +
       '<span class="l2">' + TERRAIN[k].n + ' 적성 <b class="a' + now + '">' + ADAPT_MARK[now] + '</b> → <b class="a' + Math.min(2, now + 1) + '">' + ADAPT_MARK[Math.min(2, now + 1)] + '</b>' +
@@ -444,7 +551,7 @@ function viewMod() {
     h += '</div>';
   }
 
-  h += '<h2 class="sec">【 병장 강화 】<em>레벨업 시 위력 상승</em></h2><div class="pick">';
+  h += '<h2 class="sec">【 무장 강화 】<em>레벨업 시 위력 상승</em></h2><div class="pick">';
   if (!B.w.length) h += '<div class="dis">무장이 없습니다.</div>';
   B.w.forEach((w, i) => {
     const lv = (v.wl && v.wl[i]) || 1, mx = wpMax(v, i), c = wlCost(B, lv), maxed = lv >= mx, poor = c > g.cash, dis = maxed || poor;
@@ -452,9 +559,100 @@ function viewMod() {
     h += (dis ? '<div class="dis">' : '<button data-wl="' + i + '">') +
       '<span class="l1"><span class="nm">' + esc(w.n) + ' <span class="ye">Lv' + lv + '</span><span class="dm">/' + mx + '</span></span>' +
       '<span class="cost">' + (maxed ? '<span class="li">MAX</span>' : (poor ? '<span class="rd">' : '') + cm(c) + ' C' + (poor ? '</span>' : '')) + '</span></span>' +
-      '<span class="l2">' + wepDetail(w, wpowOf(v, i), g.st.awk) + (nextPw ? ' → 위력 <b class="ye">' + cm(nextPw) + '</b>' : '') + '</span>' +
+      '<span class="l2">' + wepDetail(w, wpowOf(v, i), effStats(B).st.awk, effStats(B).e) + (nextPw ? ' → 위력 <b class="ye">' + cm(nextPw) + '</b>' : '') + '</span>' +
       (dis ? '</div>' : '</button>');
   });
+  return h + '</div>';
+}
+
+/* ---------------- 상점 (#5 · #6) ---------------- */
+function viewShop() {
+  const ri = rankIdx();
+  let h = '<h2 class="sec">【 상점 】<em>보유 ' + cm(g.cash) + ' C</em></h2>' + msgBox();
+  h += '<p class="lead">정규 발주 창구입니다. 원하는 기체를 <b>지정해서</b> 주문할 수 있지만, ' +
+    '값이 암시장보다 <b>' + Math.round((ORDER_MARKUP - 1) * 100) + '% 비싸고</b> 인도까지 시간이 걸립니다. ' +
+    '발주 가능 등급은 <b>계급</b>으로 제한됩니다 — 현재 <b class="ye">' + RANKS[ri].n + '</b>.</p>';
+
+  /* 발주 진행 현황 */
+  h += '<table class="tb"><caption>【 발주 현황 】</caption>';
+  if (!(g.orders || []).length) h += '<tr><td class="dm">발주 중인 기체가 없습니다.</td></tr>';
+  (g.orders || []).forEach((o, i) => {
+    const B = UMAP[o.id], left = o.due - g.day;
+    h += '<tr><td style="width:100%">' + esc(B.nm) +
+      ' <span class="dm">— DAY ' + o.due + ' 인도</span> ' +
+      (left <= 0 ? '<b class="li">내일 도착</b>' : '<b class="ye">' + left + '일 남음</b>') +
+      ' <button class="btn" data-cancel="' + i + '" style="float:right">【취소 · 50% 환불】</button></td></tr>';
+  });
+  h += '</table>';
+
+  /* 파츠 판매 (#6) */
+  h += '<h2 class="sec">【 파츠 】<em>개당 ' + cm(PART_PRICE) + ' C</em></h2>';
+  h += '<div class="note">※ 구입한 파츠는 창고에 쌓이고 <b>【개조】</b>에서 장착합니다. 지형 파츠 외의 품목은 <b>추후 추가 예정</b>입니다.</div>';
+  h += '<div class="pick">';
+  TER_ORDER.forEach(k => {
+    const poor = PART_PRICE > g.cash, stock = (g.parts && g.parts[k]) | 0;
+    h += (poor ? '<div class="dis">' : '<button data-bpart="' + k + '">') +
+      '<span class="l1"><span class="nm">' + PARTS[k].n + '</span><span class="cost">' +
+      (poor ? '<span class="rd">' + cm(PART_PRICE) + ' C</span>' : cm(PART_PRICE) + ' C') + '</span></span>' +
+      '<span class="l2">' + PARTS[k].d + ' <span class="dm">· 창고 보유 ' + stock + '개</span></span>' +
+      (poor ? '</div>' : '</button>');
+  });
+  h += '</div>';
+
+  /* 기체 발주 */
+  h += '<h2 class="sec">【 기체 발주 】<em>계급 ' + RANKS[ri].n + '</em></h2>';
+  h += '<div style="margin-bottom:6px">' +
+    '<select id="shopSeries" style="max-width:230px"><option value="">— 작품 전체 —</option>' +
+    SERIES_LIST.map(x => '<option value="' + esc(x) + '"' + (S.shopSr === x ? ' selected' : '') + '>' + esc(x) + '</option>').join('') +
+    '</select> <input type="text" id="shopQ" placeholder="기체명 / 형식번호" value="' + esc(S.shopQ || '') + '" style="width:180px">' +
+    ' <button class="cbtn' + (S.shopOK ? ' on' : '') + '" data-shopok="1">【발주 가능만】</button></div>';
+  const q = (S.shopQ || '').trim().toLowerCase();
+  let list = UNITS.filter(u => u.w.length &&
+    (!S.shopSr || u.sr === S.shopSr) &&
+    (!q || (u.nm + ' ' + u.mdl + ' ' + u.sr).toLowerCase().indexOf(q) >= 0));
+  if (S.shopOK) list = list.filter(u => rankReqOf(u) <= ri && orderPrice(u) <= g.cash && !g.garage.some(v => v.id === u.id));
+  list = list.sort((a, b) => uPow(a) - uPow(b));
+  const total = list.length, pg = clamp(S.shopPg | 0, 0, Math.max(0, Math.ceil(total / PAGE_N) - 1));
+  S.shopPg = pg;
+  h += '<div class="dm mn" style="margin-bottom:6px">발주 후보 ' + cm(total) + '기</div>';
+  h += pager(total, pg, 'shoppg');
+  h += '<div class="pick">';
+  list.slice(pg * PAGE_N, pg * PAGE_N + PAGE_N).forEach(B => {
+    const owned = g.garage.some(v => v.id === B.id), req = rankReqOf(B), rankOK = ri >= req;
+    const price = orderPrice(B), poor = price > g.cash, days = orderDays(B);
+    const dup = (g.orders || []).some(o => o.id === B.id);
+    const dis = owned || !rankOK || poor || dup;
+    const why = owned ? '<span class="li">보유중</span>' : dup ? '<span class="ye">발주중</span>' :
+      !rankOK ? '<span class="rd">' + RANKS[req].n + ' 필요</span>' :
+      (poor ? '<span class="rd">' + cm(price) + ' C</span>' : cm(price) + ' C');
+    h += (dis ? '<div class="dis">' : '<button data-order="' + B.id + '">') +
+      '<div class="urow"><img class="ui m" src="' + picFor(B, 'm') + '" alt="" loading="lazy" decoding="async">' +
+      '<div class="meta"><div class="t1"><span class="un">' + esc(B.nm) + '</span><span class="cost">' + why + '</span></div>' +
+      '<div class="mdl">' + esc(B.mdl || '—') + ' · ' + esc(B.sr || '') + (B.lg ? ' · 대형' : '') +
+      ' · <b class="cy">' + days + '일 소요</b> · 발주 계급 ' + RANKS[req].n + '</div>' +
+      statLine(B) + terLine(B, false) + '</div></div>' + (dis ? '</div>' : '</button>');
+  });
+  h += '</div>' + pager(total, pg, 'shoppg');
+  return h;
+}
+
+/* 페이지 넘김 위젯 — 도감·상점이 함께 쓴다 (#9) */
+const PAGE_N = 60;
+function pager(total, pg, tag) {
+  const last = Math.max(0, Math.ceil(total / PAGE_N) - 1);
+  if (last <= 0) return '';
+  let h = '<div class="pager">';
+  h += '<button class="pbtn" data-' + tag + '="' + Math.max(0, pg - 1) + '"' + (pg <= 0 ? ' disabled' : '') + '>◀</button>';
+  /* 앞뒤 4칸씩만 펼치고 양끝은 항상 보여준다 */
+  const nums = new Set([0, last]);
+  for (let i = pg - 4; i <= pg + 4; i++) if (i >= 0 && i <= last) nums.add(i);
+  const arr = [...nums].sort((a, b) => a - b);
+  arr.forEach((i, j) => {
+    if (j && i - arr[j - 1] > 1) h += '<span class="pgap">…</span>';
+    h += '<button class="pbtn' + (i === pg ? ' on' : '') + '" data-' + tag + '="' + i + '">' + (i + 1) + '</button>';
+  });
+  h += '<button class="pbtn" data-' + tag + '="' + Math.min(last, pg + 1) + '"' + (pg >= last ? ' disabled' : '') + '>▶</button>';
+  h += '<span class="dm pgn">' + (pg + 1) + ' / ' + (last + 1) + ' 페이지 · ' + PAGE_N + '기씩</span>';
   return h + '</div>';
 }
 
@@ -517,16 +715,20 @@ function viewBook() {
   const list = UNITS.filter(u => (!S.bookSr || u.sr === S.bookSr) &&
     (!q || (u.nm + ' ' + u.mdl + ' ' + u.sr).toLowerCase().indexOf(q) >= 0))
     .sort((a, b) => uPow(b) - uPow(a));
-  h += '<div class="dm mn" style="margin-bottom:6px">검색 결과 ' + list.length + '기</div>';
+  const total = list.length;
+  const pg = clamp(S.bookPg | 0, 0, Math.max(0, Math.ceil(total / PAGE_N) - 1));
+  S.bookPg = pg;
+  h += '<div class="dm mn" style="margin-bottom:6px">검색 결과 ' + cm(total) + '기</div>';
+  h += pager(total, pg, 'bookpg');
   if (S.bookSel && UMAP[S.bookSel]) {
     const B = UMAP[S.bookSel];
-    h += '<div class="rbox"><div class="urow"><img class="ui xl" src="' + B.img + '" alt="">' +
+    h += '<div class="rbox"><div class="urow"><img class="ui xl zoomable" src="' + B.img + '" alt=""' + zoomAttr(B) + '>' +
       '<div class="meta"><div class="rt" style="font-size:16px">' + esc(B.nm) + '</div>' +
       '<div class="mdl">' + esc(B.mdl || '—') + ' · ' + esc(B.sr || '') + (B.lg ? ' · 대형' : '') + '</div>' +
       statLine(B) + terLine(B, false) +
       '<div class="dm mn" style="font-size:10.5px;margin-top:3px">시세 ' + cm(buyPrice(B)) + ' C · 요구 Lv' + lvReqOf(B) + '</div>' +
       '</div></div>' +
-      '<table class="tb" style="margin:6px 0 0"><caption>【 병장 】</caption>';
+      '<table class="tb" style="margin:6px 0 0"><caption>【 무장 】</caption>';
     B.w.forEach(w => h += '<tr><td style="width:100%">' + esc(w.n) +
       '<div class="dm sm">Lv1 ' + cm(w.pw[0]) + ' → Lv' + w.pw.length + ' ' + cm(w.pw[w.pw.length - 1]) +
       ' · ' + (wIsMelee(w) ? '격투' : '사격') + ' · ' + esc(w.at || '-') + (wIsAwk(w) ? ' <span class="pk">〔각성〕</span>' : '') +
@@ -542,12 +744,12 @@ function viewBook() {
     h += '<div class="row-btn"><button class="btn" data-bkclose="1">【닫기】</button></div></div>';
   }
   h += '<div class="ugrid">';
-  list.forEach(B => h += '<button class="ucard" data-bk="' + B.id + '">' +
+  list.slice(pg * PAGE_N, pg * PAGE_N + PAGE_N).forEach(B => h += '<button class="ucard" data-bk="' + B.id + '">' +
     '<img class="ui m" src="' + picFor(B, 'm') + '" alt="" loading="lazy" decoding="async">' +
     '<div style="min-width:0"><div class="cn">' + esc(B.nm) + '</div>' +
     '<div class="cs">' + esc(B.mdl || '') + '</div>' +
     '<div class="cs">' + TER_ORDER.map(k => '<b class="a' + adaptBase(B, k) + '">' + ADAPT_MARK[adaptBase(B, k)] + '</b>').join('') + '</div></div></button>');
-  return h + '</div>';
+  return h + '</div>' + pager(total, pg, 'bookpg');
 }
 
 /* ---------------- 기록 ---------------- */
@@ -592,11 +794,83 @@ function bindMain() {
   };
 
   host.querySelectorAll('[data-tr]').forEach(b => b.onclick = () => doTrain(b.dataset.tr));
-  host.querySelectorAll('[data-sk]').forEach(b => b.onclick = () => {
-    const sk = CSKMAP[b.dataset.sk];
-    if (!sk || g.sk.indexOf(sk.k) >= 0 || sk.c > g.cash) return;
-    g.cash -= sk.c; g.sk.push(sk.k);
-    S.msg = { t: sk.n + ' 습득', b: cm(sk.c) + 'C 지불.' };
+  /* 파일럿 스킬 습득·강화 (#15) */
+  host.querySelectorAll('[data-sklv]').forEach(b => b.onclick = () => {
+    const K = PSKMAP[b.dataset.sklv]; if (!K) return;
+    const lv = pskLv(K.k), max = K.nolv ? 1 : PSK_MAXLV;
+    const c = pskCost(lv);
+    if (lv >= max || c > g.cash) return;
+    g.cash -= c; g.sk[K.k] = lv + 1;
+    S.msg = { t: K.n + (lv ? ' Lv' + (lv + 1) : ' 습득'), b: cm(c) + 'C 지불 — ' + esc(K.d) };
+    save(); renderAll();
+  });
+  host.querySelectorAll('[data-eq]').forEach(b => b.onclick = () => {
+    const K = PSKMAP[b.dataset.eq]; if (!K) return;
+    if (pskLv(K.k) <= 0 || pskEquipped(K.k) || g.eq.length >= PSK_SLOT) return;
+    if (K.g && g.eq.some(x => PSKMAP[x] && PSKMAP[x].g === K.g)) return;
+    g.eq.push(K.k);
+    if (K.k === 'ot') S.msg = { t: '올드타입 장착', b: '각성이 <b class="rd">0으로 고정</b>됩니다. 각성 무장은 사용할 수 없습니다.' };
+    else S.msg = { t: K.n + ' 장착', b: esc(K.d) };
+    save(); renderAll();
+  });
+  host.querySelectorAll('[data-uneq]').forEach(b => b.onclick = () => {
+    const i = g.eq.indexOf(b.dataset.uneq);
+    if (i < 0) return;
+    g.eq.splice(i, 1);
+    S.msg = { t: '장착 해제', b: PSKMAP[b.dataset.uneq].n + ' 을(를) 내렸습니다.' };
+    save(); renderAll();
+  });
+
+  /* 기체 강화 포인트 (#1~#3) */
+  host.querySelectorAll('[data-ua]').forEach(b => b.onclick = () => {
+    const k = b.dataset.ua, n = +b.dataset.n, v = cur();
+    const room = Math.max(0, Math.ceil((UCAP[k] - uBase(v, k)) / UINV_STEP[k]) - uAlloc[k]);
+    const step = n > 0 ? Math.min(n, v.upt - uSpent(), room) : Math.max(n, -uAlloc[k]);
+    if (!step) return;
+    uAlloc[k] += step; renderMain();
+  });
+  const uc = $('bUaCancel'); if (uc) uc.onclick = () => { resetUAlloc(); renderMain(); };
+  const uo = $('bUaOK'); if (uo) uo.onclick = () => {
+    const v = cur(), n = uSpent();
+    if (n <= 0 || n > v.upt) return;
+    const before = uStat(v).hpMax;
+    UIK.forEach(k => v.inv[k] = (v.inv[k] | 0) + uAlloc[k]);
+    v.upt -= n; resetUAlloc();
+    v.hp += uStat(v).hpMax - before;             /* HP 를 올렸으면 그만큼 실HP도 늘려 준다 */
+    v.hp = clamp(v.hp, 1, uStat(v).hpMax);
+    S.msg = { t: '기체 강화 완료', b: n + '포인트를 투입했습니다.' };
+    save(); renderAll();
+  };
+
+  /* 상점 (#5 · #6) */
+  const sq = $('shopQ');
+  if (sq) sq.oninput = () => { S.shopQ = sq.value; S.shopPg = 0; const c = sq.selectionStart; renderMain(); const n2 = $('shopQ'); if (n2) { n2.focus(); n2.setSelectionRange(c, c); } };
+  const ss = $('shopSeries'); if (ss) ss.onchange = () => { S.shopSr = ss.value; S.shopPg = 0; S.msg = null; renderMain(); };
+  host.querySelectorAll('[data-shopok]').forEach(b => b.onclick = () => { S.shopOK = !S.shopOK; S.shopPg = 0; renderMain(); });
+  host.querySelectorAll('[data-bpart]').forEach(b => b.onclick = () => {
+    const k = b.dataset.bpart;
+    if (PART_PRICE > g.cash) return;
+    g.cash -= PART_PRICE; g.parts[k] = (g.parts[k] | 0) + 1;
+    S.msg = { t: PARTS[k].n + ' 구입', b: cm(PART_PRICE) + 'C 지불 — 창고 보유 ' + g.parts[k] + '개. 【개조】에서 장착하십시오.' };
+    save(); renderAll();
+  });
+  host.querySelectorAll('[data-order]').forEach(b => b.onclick = () => {
+    const B = UMAP[b.dataset.order]; if (!B) return;
+    const price = orderPrice(B), days = orderDays(B);
+    if (rankIdx() < rankReqOf(B) || price > g.cash) return;
+    if (g.garage.some(v => v.id === B.id) || g.orders.some(o => o.id === B.id)) return;
+    g.cash -= price;
+    g.orders.push({ id: B.id, due: g.day + days, price: price });
+    S.msg = { t: '발주 접수', b: esc(B.nm) + ' — ' + cm(price) + 'C 선불. <b class="ye">DAY ' + (g.day + days) + '</b> 인도 예정입니다.' };
+    save(); renderAll();
+  });
+  host.querySelectorAll('[data-cancel]').forEach(b => b.onclick = () => {
+    const i = +b.dataset.cancel, o = g.orders[i];
+    if (!o) return;
+    const back = Math.round(o.price * 0.5);
+    if (!confirm(UMAP[o.id].nm + ' 발주를 취소합니다. ' + cm(back) + 'C 만 환불됩니다.')) return;
+    g.orders.splice(i, 1); g.cash += back;
+    S.msg = { t: '발주 취소', b: cm(back) + 'C 환불되었습니다.' };
     save(); renderAll();
   });
 
@@ -630,19 +904,18 @@ function bindMain() {
     save(); renderAll();
   });
   host.querySelectorAll('[data-part]').forEach(b => b.onclick = () => {
-    const k = b.dataset.part, v = cur(), B = UMAP[v.id], c = partCost(B);
-    if ((v.pt || []).length >= PART_SLOT || adaptOf(v, k) >= 2 || c > g.cash) return;
-    g.cash -= c; v.pt.push(k);
-    S.msg = { t: PARTS[k].n + ' 장착', b: cm(c) + 'C 투입 — ' + TERRAIN[k].n + ' 적성 ' + ADAPT_MARK[adaptOf(v, k)] + ' 로 상승했습니다.' };
+    const k = b.dataset.part, v = cur();
+    if ((v.pt || []).length >= PART_SLOT || adaptOf(v, k) >= 2 || ((g.parts[k] | 0) <= 0)) return;
+    g.parts[k]--; v.pt.push(k);
+    S.msg = { t: PARTS[k].n + ' 장착', b: TERRAIN[k].n + ' 적성이 <b class="li">' + ADAPT_MARK[adaptOf(v, k)] + '</b> 로 올랐습니다.' };
     save(); renderAll();
   });
   host.querySelectorAll('[data-unpart]').forEach(b => b.onclick = () => {
     const i = +b.dataset.unpart, v = cur();
     if (!v.pt || i < 0 || i >= v.pt.length) return;
     const k = v.pt[i];
-    if (!confirm(PARTS[k].n + ' 을(를) 탈거합니다. 대금은 환불되지 않습니다.')) return;
-    v.pt.splice(i, 1);
-    S.msg = { t: '파츠 탈거', b: PARTS[k].n + ' 을(를) 떼어냈습니다.' };
+    v.pt.splice(i, 1); g.parts[k] = (g.parts[k] | 0) + 1;
+    S.msg = { t: '파츠 탈거', b: PARTS[k].n + ' 을(를) 창고로 되돌렸습니다. (보유 ' + g.parts[k] + '개)' };
     save(); renderAll();
   });
   host.querySelectorAll('[data-wl]').forEach(b => b.onclick = () => {
@@ -677,12 +950,14 @@ function bindMain() {
     save(); renderAll();
   });
 
-  const bs = $('bookSeries'); if (bs) bs.onchange = () => { S.bookSr = bs.value; renderMain(); };
+  const bs = $('bookSeries'); if (bs) bs.onchange = () => { S.bookSr = bs.value; S.bookPg = 0; renderMain(); };
+  host.querySelectorAll('[data-bookpg]').forEach(b => b.onclick = () => { S.bookPg = +b.dataset.bookpg; renderMain(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+  host.querySelectorAll('[data-shoppg]').forEach(b => b.onclick = () => { S.shopPg = +b.dataset.shoppg; renderMain(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
   host.querySelectorAll('[data-bk]').forEach(b => b.onclick = () => { S.bookSel = b.dataset.bk; renderMain(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
   host.querySelectorAll('[data-bkclose]').forEach(b => b.onclick = () => { S.bookSel = null; renderMain(); });
   const bq = $('bookQ');
   if (bq) {
-    bq.oninput = () => { S.bookQ = bq.value; const p = bq.selectionStart; renderMain(); const n = $('bookQ'); if (n) { n.focus(); n.setSelectionRange(p, p); } };
+    bq.oninput = () => { S.bookQ = bq.value; S.bookPg = 0; const p = bq.selectionStart; renderMain(); const n = $('bookQ'); if (n) { n.focus(); n.setSelectionRange(p, p); } };
   }
 }
 
@@ -698,8 +973,19 @@ function nextDay() {
   for (const e of EVENTS) { r -= e.p; if (r <= 0) { ev = e; break; } }
   const txt = ev.f(g);
   cur().hp = Math.min(cur().hp, uStat(cur()).hpMax);
+
+  /* 상점 발주 인도 (#5) */
+  const done = [];
+  g.orders = (g.orders || []).filter(o => {
+    if (g.day < o.due) return true;
+    if (g.garage.some(v => v.id === o.id)) { g.cash += Math.round(o.price * 0.5); done.push(UMAP[o.id].nm + ' <span class="dm">(중복 보유 — 50% 환불)</span>'); return false; }
+    g.garage.push(mkOwned(o.id)); done.push(UMAP[o.id].nm);
+    return false;
+  });
+
   S.view = 'main'; S.res = null;
   S.msg = { t: 'DAY ' + g.day + ' — 아침 점호', b: '부대 유지비 <b class="rd">−' + cm(up) + 'C</b> 청구. 행동력 ' + g.apMax + ' 회복.<br>' + txt +
+    (done.length ? '<br><b class="li">발주 인도</b> — ' + done.map(esc).join(', ') + ' 이(가) 격납고에 들어왔습니다.' : '') +
     '<br><span class="dm">암시장 매물이 새로 들어왔습니다.</span>' };
   save(); renderAll();
 }
@@ -713,7 +999,7 @@ $('aLoad').onclick = () => {
 $('aReset').onclick = () => {
   if (!confirm('기록을 완전히 말소하고 새 파일럿을 등록합니다.\n되돌릴 수 없습니다. 진행하시겠습니까?')) return;
   try { localStorage.removeItem(SAVEKEY); } catch (e) {}
-  g = null; newSt = null; startPool = null; trAlloc = null; S.view = 'main'; S.msg = null;
+  g = null; newSt = null; startPool = null; trAlloc = null; uAlloc = null; S.view = 'main'; S.msg = null;
   stamp('기록 말소됨'); renderAll();
 };
 

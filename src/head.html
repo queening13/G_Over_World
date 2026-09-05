@@ -252,6 +252,38 @@ input:focus,select:focus{border-color:var(--cy);outline:none}
 #blog .l.sct{color:#9a8fd0}
 #blog .l.fore{color:#c98cff;font-weight:700}
 
+/* ---- 이미지 확대 (#10) ---- */
+.zoomable{cursor:zoom-in}
+#zoom{position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.88);
+  display:flex;align-items:center;justify-content:center;padding:16px;cursor:zoom-out}
+/* display:flex 는 브라우저 기본 [hidden]{display:none} 을 이겨 버린다.
+   명시적으로 다시 눌러 두지 않으면 닫아도 화면이 계속 어둡게 덮인다. */
+#zoom[hidden]{display:none}
+#zoom .zbox{max-width:100%;max-height:100%;text-align:center}
+#zoom img{max-width:min(94vw,940px);max-height:84vh;width:auto;height:auto;
+  border:1px solid var(--bdhot);background:#05050a;image-rendering:auto}
+#zoom .zcap{margin-top:6px;font-family:var(--f-mn);font-size:12px;color:var(--tx)}
+
+/* ---- 페이지 넘김 (#9) ---- */
+.pager{display:flex;flex-wrap:wrap;align-items:center;gap:2px;margin:0 0 6px}
+.pbtn{border:1px solid var(--bd);background:#0e0e20;color:var(--lnk);
+  font-family:var(--f-mn);font-size:11px;padding:1px 7px;min-width:26px;text-align:center}
+.pbtn:hover:not([disabled]){background:#1a1a3a;color:var(--yel);border-color:var(--bdhot)}
+.pbtn.on{background:#221c06;color:var(--yel);border-color:#7a6a20}
+.pbtn[disabled]{opacity:.35;cursor:not-allowed}
+.pgap{color:var(--dim);padding:0 2px}
+.pgn{margin-left:6px;font-family:var(--f-mn);font-size:10.5px}
+
+/* ---- 파일럿 스킬 ---- */
+.skrow{display:block;padding:5px 8px;border-bottom:1px solid var(--bd2);background:var(--row2)}
+.skrow:last-child{border-bottom:none}
+.skrow .nm{color:var(--lnk);font-size:12.5px}
+.skline{display:flex;flex-wrap:wrap;gap:2px;margin-bottom:8px}
+.skline b{font-weight:400;font-size:10.5px;color:var(--yel);border:1px solid #6a4a9a;
+  background:#160f26;padding:0 5px}
+.skline b i{font-style:normal;color:#c98cff}
+.eff{font-family:var(--f-mn);font-size:9.5px;margin-left:3px}
+
 @media (max-width:860px){
   #frames{grid-template-columns:1fr}
   #lft{border-right:none;border-bottom:1px solid var(--bd)}
@@ -265,14 +297,12 @@ input:focus,select:focus{border-color:var(--cy);outline:none}
 <body>
 <div id="wrap">
   <div id="notice">
-    <div class="row">【필독】 ※ 본 게임은 <b>FF ADVENTURE</b> 계열 2d6 대항판정 규칙으로 동작합니다. 진행 상황은 브라우저에 자동 저장됩니다.</div>
     <div class="row">【안내】 ※ 행동력을 모두 소진하면 <b>【다음 날】</b>로 넘어가며 부대 유지비가 청구되고 <b>암시장</b> 매물이 초기화됩니다.</div>
     <div class="row">【전투】 ※ <b>전장 적성</b>·<b>교전 거리(1~20)</b>·<b>색적</b>·<b>EN</b>이 승패를 가릅니다. 각성 800 이상이면 <b>미래 예측</b>이 발동합니다.</div>
   </div>
   <div id="head">
     <div>
       <div class="ttl">G-Over <i>World</i><span class="ver">v4.0 / 2d6 SYSTEM</span></div>
-      <div class="dm mn" style="font-size:10.5px">G-OVER WORLD — PILOT SERVICE RECORD</div>
     </div>
     <div class="sys">
       <a id="aSave">【저장】</a> <a id="aLoad">【불러오기】</a> <a id="aReset">【기록말소】</a><br>
@@ -284,6 +314,7 @@ input:focus,select:focus{border-color:var(--cy);outline:none}
     <div id="mainf" aria-live="polite"></div>
   </div>
   <div id="cmdbar"></div>
+  <div id="zoom" hidden></div>
   <div id="foot">
     <b>G-OVER WORLD</b> — FF ADVENTURE(D.Takamiya) 계열 2d6 대항판정 규칙 기반 육성 시뮬레이션.
     기체 제원·무장·이미지 출처 : <a href="https://ggendb.up.railway.app/u" target="_blank" rel="noopener">GGen Eternal Database</a>.

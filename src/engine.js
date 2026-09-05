@@ -42,12 +42,12 @@ const AWK_FORESEE_P = 0.05;
 const AWK_RANGE_CAP = 13; /* 각성 무장 사거리 상한 */
 
 const STAT_DESC = {
-  sho: '사격 병장의 명중과 화력.',
-  mel: '격투 병장의 명중과 화력.',
+  sho: '사격 무장의 명중과 화력.',
+  mel: '격투 무장의 명중과 화력.',
   def: '피탄 시 장갑 환산치. 받는 피해를 줄인다.',
-  rea: '회피 · 거리 싸움 · 적 발견에 관여한다.',
+  rea: '회피 · 거리 싸움 · 명중에 관여한다.',
   awk: '각성 무장의 명중 · 회피 · 사거리. 800 이상이면 미래 예측이 발동한다.',
-  spi: '전투 개시 기력과 기력 상승폭.'
+  spi: '기력, 패널티 경감, 크리티컬, 저력 발동률.'
 };
 
 /* 훈련 성공 확률 — 능력치 구간별 차등. 400 이상은 1% 고정, 상한은 없다. */
@@ -65,11 +65,94 @@ const TRAIN_TIER = [
 const trainTier = v => { let t = TRAIN_TIER[0]; TRAIN_TIER.forEach(x => { if (v >= x.lo) t = x; }); return t; };
 const TRAIN_AP = 1;
 
-/* 캐릭터 스킬 — 훈련소에서 자금으로 구매한다.
-   ※ 스킬 목록은 추후 추가 예정. 여기에 항목을 넣으면 그대로 상점에 뜬다.
-      { k:'고유키', n:'표시명', c:비용, d:'설명', f:전투보정 } */
-const CSKILL = [];
-const CSKMAP = {}; CSKILL.forEach(s => CSKMAP[s.k] = s);
+/* =========================================================================
+   파일럿 스킬 (#15)
+
+   훈련소에서 자금으로 습득하고 레벨을 올린다(Lv1~10). 장착은 최대 PSK_SLOT 개.
+   `g:'origin'` 이 붙은 것끼리는 동시에 장착할 수 없다 —
+   뉴타입 · 강화인간 · 올드타입 · SEED · 코디네이터 · 이노베이터 · 이노베이드.
+
+   e(L, x, ctx) 가 효과 객체 x 를 채운다.
+     x.st[k]   능력치 상승률   (+0.20 = +20%)
+     x.pst[k]  능력치 하락률   — 패널티라서 penMul 이 곱해진다
+     x.foe.rea 적 반응 하락률
+     x.penRed  패널티 감소율 / x.penAdd 패널티 증가율
+     x.rangeS  사격 무장 최대 사거리 고정 가산 / x.rangeM 격투 쪽
+     x.enS     사격 무장 EN 소모 경감률 / x.enM 격투 쪽
+     x.awkZero 각성을 0으로 고정
+     x.reaper  은신 후 첫 공격의 크리티컬 확정 확률
+     x.opening 전투 개시 10턴 기체 공격·방어·기동 상승률
+     x.seedP   매 턴 SEED 발동 확률
+   ========================================================================= */
+const PSK_MAXLV = 10;
+const PSK_SLOT = 3;
+const SEED_BONUS = 0.20;      /* SEED 발동 시 각성·반응 상승률 (고정) */
+const VET_LV0 = 500, VET_LV1 = 900;   /* 역전의 용사 적용 구간 */
+
+const PSKILL = [
+  { k: 'nt',   n: '뉴타입',     g: 'origin', d: '각성·반응 +2%/Lv',
+    e: (L, x) => { x.st.awk += .02 * L; x.st.rea += .02 * L; } },
+  { k: 'cyb',  n: '강화인간',   g: 'origin', d: '각성·반응·수비 +2%/Lv · 정신 −1%/Lv',
+    e: (L, x) => { x.st.awk += .02 * L; x.st.rea += .02 * L; x.st.def += .02 * L; x.pst.spi += .01 * L; } },
+  { k: 'chr',  n: '카리스마',   d: '적 반응 −2%/Lv',
+    e: (L, x) => { x.foe.rea += .02 * L; } },
+  { k: 'shox', n: '사격 전문가', d: '사격 무장 최대 사거리 +1 · 사격 EN 소모 −1%/Lv',
+    e: (L, x) => { x.rangeS = 1; x.enS += .01 * L; } },
+  { k: 'melx', n: '격투 전문가', d: '격투 무장 최대 사거리 +1 · 격투 EN 소모 −1%/Lv',
+    e: (L, x) => { x.rangeM = 1; x.enM += .01 * L; } },
+  { k: 'poker', n: '포커페이스', d: '모든 패널티 −5%/Lv',
+    e: (L, x) => { x.penRed += .05 * L; } },
+  { k: 'ot',   n: '올드타입',   g: 'origin', d: '각성 0 고정·상승 불가 · 전 능력치 +1%/Lv',
+    e: (L, x) => { STK.forEach(k => x.st[k] += .01 * L); x.awkZero = true; } },
+  { k: 'wall', n: '철벽',       d: '수비 +2%/Lv',
+    e: (L, x) => { x.st.def += .02 * L; } },
+  { k: 'bers', n: '광전사',     d: '사격·격투·반응 +3%/Lv · 수비 −2%/Lv · 각성 −1%/Lv · 받는 패널티 +1%/Lv',
+    e: (L, x) => { x.st.sho += .03 * L; x.st.mel += .03 * L; x.st.rea += .03 * L;
+                   x.pst.def += .02 * L; x.pst.awk += .01 * L; x.penAdd += .01 * L; } },
+  { k: 'reap', n: '사신',       d: '시야에서 사라진 뒤 첫 공격이 10%/Lv 로 크리티컬 확정',
+    e: (L, x) => { x.reaper += .10 * L; } },
+  { k: 'meteo', n: '오퍼레이션 메테오', d: '전투 개시 10턴간 기체 공격·방어·기동 +1%/Lv',
+    e: (L, x) => { x.opening += .01 * L; } },
+  { k: 'seed', n: 'SEED',       g: 'origin', d: '매 턴 5%/Lv 로 발동 — 발동 시 전투 종료까지 각성·반응 +20%',
+    e: (L, x) => { x.seedP += .05 * L; } },
+  { k: 'coord', n: '코디네이터', g: 'origin', d: '사격·격투·수비·반응 +1%/Lv',
+    e: (L, x) => { ['sho', 'mel', 'def', 'rea'].forEach(k => x.st[k] += .01 * L); } },
+  { k: 'meist', n: '건담 마이스터', d: "기체명에 '건담'이 들어가면 정신 +2%/Lv",
+    e: (L, x, c) => { if (c.isGundam) x.st.spi += .02 * L; } },
+  { k: 'innov', n: '이노베이터', g: 'origin', d: '각성·반응·정신 +1.5%/Lv',
+    e: (L, x) => { x.st.awk += .015 * L; x.st.rea += .015 * L; x.st.spi += .015 * L; } },
+  { k: 'inno', n: '이노베이드', g: 'origin', d: '사격·격투·각성·반응 +1%/Lv',
+    e: (L, x) => { ['sho', 'mel', 'awk', 'rea'].forEach(k => x.st[k] += .01 * L); } },
+  /* 스킬 레벨이 없다. 파일럿 레벨 500 에서 10%, 900 이상에서 20%. */
+  { k: 'vet',  n: '역전의 용사', nolv: true, d: '파일럿 Lv500부터 사격·격투·수비·반응 +10% → Lv900 +20%',
+    e: (L, x, c) => {
+      if ((c.plv | 0) < VET_LV0) return;
+      const r = clamp(0.10 + (c.plv - VET_LV0) / (VET_LV1 - VET_LV0) * 0.10, 0.10, 0.20);
+      ['sho', 'mel', 'def', 'rea'].forEach(k => x.st[k] += r);
+    } }
+];
+const PSKMAP = {}; PSKILL.forEach(v => PSKMAP[v.k] = v);
+/* 습득·레벨업 비용 — 현재 레벨이 높을수록 가파르게 오른다 */
+const pskCost = lv => Math.round(80000 * Math.pow(lv + 1, 1.6) / 1000) * 1000;
+const pskLv = k => (g.sk && (g.sk[k] | 0)) || 0;
+const pskEquipped = k => (g.eq || []).indexOf(k) >= 0;
+
+/* 스킬 효과 집계 */
+function skillEffect(c) {
+  const x = { st: {}, pst: {}, foe: { rea: 0 }, penRed: 0, penAdd: 0,
+              rangeS: 0, rangeM: 0, enS: 0, enM: 0,
+              awkZero: false, reaper: 0, opening: 0, seedP: 0 };
+  STK.forEach(k => { x.st[k] = 0; x.pst[k] = 0; });
+  (c.eq || []).forEach(k => {
+    const S = PSKMAP[k]; if (!S) return;
+    const L = S.nolv ? 1 : clamp((c.sk && c.sk[k]) | 0, 0, PSK_MAXLV);
+    if (!S.nolv && L < 1) return;
+    S.e(L, x, c);
+  });
+  x.penRed = Math.min(x.penRed, 0.50);
+  return x;
+}
+const EMPTY_EFF = () => skillEffect({ eq: [], sk: {} });
 
 /* =========================================================================
    전장 · 지형 적성
@@ -87,8 +170,10 @@ const ADAPT_MARK = ['×', '△', '○'];
 const terMul = a => a >= 2 ? 1 : 0.85;   /* △ 는 공격·기동 85% */
 
 /* 지형 적성 파츠 — 해당 지형 적성을 1단계 올린다(× → △ → ○).
-   같은 파츠를 두 번 달면 × 에서 ○ 까지 끌어올릴 수 있다. */
-const PART_SLOT = 2;
+   같은 파츠를 두 번 달면 × 에서 ○ 까지 끌어올릴 수 있다.
+   슬롯 3칸은 지형 파츠와 (추후 추가될) 다른 파츠가 함께 쓴다. */
+const PART_SLOT = 3;
+const PART_PRICE = 220000;      /* 상점 판매가 — 기체와 무관한 정찰가 */
 const PARTS = {};
 TER_ORDER.forEach(k => PARTS[k] = { t: k, n: TERRAIN[k].n + ' 항행 유닛', d: TERRAIN[k].n + ' 적성 1단계 상승' });
 
@@ -103,8 +188,24 @@ const MOD = {
 };
 const MODMAX = 10;
 
-/* 기체 제원 상한 (#20~#22) */
+/* 기체 제원 상한 */
 const UCAP = { hp: 999999, en: 999, atk: 9999, def: 9999, mob: 9999, sct: 9999 };
+
+/* =========================================================================
+   기체 레벨 (#1~#4)
+   전투에서 EXP 를 쌓아 레벨이 오르고, 레벨마다 강화 포인트를 받는다.
+   HP 는 1pt = +100, 나머지는 1pt = +1.
+   ========================================================================= */
+const UIK = ['hp', 'en', 'atk', 'def', 'mob', 'sct'];
+const UIN = { hp: 'HP', en: 'EN', atk: '공격', def: '방어', mob: '기동', sct: '색적' };
+const UINV_STEP = { hp: 100, en: 1, atk: 1, def: 1, mob: 1, sct: 1 };
+const ULV_MAX = 9999;
+const ULVUP_PT = 4;   /* 기체 레벨업 1회당 강화 포인트.
+                         2~9999 레벨 = 9998회 × 4 = 39,992.
+                         전 항목을 상한까지 올리는 데 드는 포인트는 가장 강한 기체
+                         (Full Armor ZZ Gundam (EX)) 기준으로도 44,565 이므로
+                         레벨업만으로는 전 능력치 최대에 도달할 수 없다. */
+const uExpNeed = lv => Math.round(80 * Math.pow(lv, 1.32));
 
 /* =========================================================================
    전투 밸런스 계수
@@ -121,6 +222,29 @@ const HIT_CLAMP = 6;          /* 명중 우열 상한. 확정 명중·확정 회
 const STAT_HIT_K = 6;
 const MOB_EVA_K = 350;
 const EN_REGEN = 0.10;        /* 매 라운드 최대 EN 의 10% 자동 회복 */
+
+/* 정신 (#14)
+   1) 파일럿·기체에 붙는 모든 패널티를 깎는다 — 지형 △, 전법의 음(−) 보정,
+      사거리 밖(desperate), 대형기 회피, 스킬 자체 하락분.
+   2) 크리티컬 필요 마진을 낮춘다.
+   3) HP 가 30% 이하로 떨어지면 매 라운드 저력 판정을 굴린다. */
+const SPI_PEN_MAX = 0.30;     /* 정신 999 에서 패널티 30% 경감 */
+const SPI_CRIT_K = 150;       /* 정신 150당 크리티컬 필요 마진 −1 */
+const GUTS_HP = 0.30;         /* 저력 판정을 시작하는 HP 비율 */
+const GUTS_TURN = 10;         /* 저력 지속 턴 */
+const GUTS_MUL = 1.30;        /* 명중률·회피율·방어력 상승률 */
+/* 정신 1 → 0.1% · 999 → 99.9% */
+const gutsP = spi => spi < 1 ? 0 : clamp(0.001 + (spi - 1) / (STAT_MAX - 1) * 0.998, 0, 0.999);
+/* 최종 패널티 배수. 광전사는 반대로 더 아프게 만든다. */
+const penMulOf = (spi, e) => clamp(1 - (spi / STAT_MAX) * SPI_PEN_MAX - (e ? e.penRed : 0) + (e ? e.penAdd : 0), 0.10, 1.60);
+/* 명중 확률에 배수를 걸고, 그 확률에 가장 가까운 우열값으로 되돌린다.
+   2d6 대항판정의 주사위 서사를 유지하면서 '명중률 30% 상승'을 그대로 표현한다. */
+function advForP(t) {
+  let best = -14, bd = 9;
+  for (let i = -14; i <= 14; i++) { const d = Math.abs(OPP[i] - t); if (d < bd) { bd = d; best = i; } }
+  return best;
+}
+const advScale = (adv, mul) => advForP(clamp(oppP(adv) * mul, 0.02, 0.98));
 
 /* 거리 (#12) — 무장 사거리보다 넓은 개념. 1(밀착) ~ 20(초장거리) */
 const DIST_MIN = 1, DIST_MAX = 20;
@@ -156,14 +280,16 @@ const EVENTS = [
 /* =========================================================================
    상태 / 세이브
    ========================================================================= */
-const SAVEKEY = 'gover.world.v4';
+const SAVEKEY = 'gover.world.v5';
 const AP_BASE = 10;              /* 일일 행동력 기본값 */
 const START_CASH = 80000;
 const REPAIR_RATE = 0.16;
 let g = null;
 const S = {
   view: 'main', busy: false, skip: false, msg: null, res: null,
-  tac: 'norm', ter: 'sp', bookSr: '', bookSel: '', bookQ: ''
+  tac: 'norm', ter: 'sp',
+  bookSr: '', bookSel: '', bookQ: '', bookPg: 0,
+  shopSr: '', shopQ: '', shopOK: false, shopPg: 0
 };
 const $ = id => document.getElementById(id);
 const cur = () => g.garage[g.cur];
@@ -175,17 +301,40 @@ const buyPrice = B => Math.round(Math.pow(uPow(B) / 1000, 1.6) * 90 * (B.lg ? 1.
 const lvReqOf = B => clamp(Math.round((uPow(B) - 100000) / 12000), 1, 40);
 const modCost = (B, lv) => Math.round(buyPrice(B) * 0.045 * Math.pow(1.34, lv) / 100) * 100;
 const wlCost = (B, lv) => Math.round(buyPrice(B) * 0.05 * lv / 100) * 100;
-const partCost = B => Math.round(buyPrice(B) * 0.10 / 1000) * 1000;
+
+/* ---- 상점 발주 (#5) — 암시장보다 비싸고 오래 걸리지만 원하는 기체를 지정한다 ---- */
+const ORDER_MARKUP = 1.15;
+const orderPrice = B => Math.round(buyPrice(B) * ORDER_MARKUP / 100) * 100;
+const orderDays = B => clamp(Math.round(uPow(B) / 26000), 3, 20);
+/* 발주는 계급으로 막는다. 고정 구간으로 자르면 계급별 기체 수가 크게 쏠리므로
+   (실측 대령 1기 · 중위 305기) 로스터 전체의 성능 백분위로 8등분한다. */
+const POW_SORTED = UNITS.map(uPow).sort((a, b) => a - b);
+function powPct(B) {
+  const v = uPow(B);
+  let lo = 0, hi = POW_SORTED.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (POW_SORTED[m] < v) lo = m + 1; else hi = m; }
+  return lo / POW_SORTED.length;
+}
+const rankReqOf = B => clamp(Math.floor(powPct(B) * RANKS.length), 0, RANKS.length - 1);
+const rankIdx = () => { let i = 0; RANKS.forEach((v, j) => { if (g.kills >= v.k) i = j; }); return i; };
 
 function mkOwned(id) {
   const B = UMAP[id];
-  return { id: id, hp: B.hp, mod: { hp: 0, en: 0, def: 0, mob: 0, atk: 0, sct: 0 }, wl: B.w.map(() => 1), pt: [] };
+  const inv = {}; UIK.forEach(k => inv[k] = 0);
+  return { id: id, hp: B.hp, ulv: 1, uexp: 0, upt: 0, inv: inv,
+           mod: { hp: 0, en: 0, def: 0, mob: 0, atk: 0, sct: 0 }, wl: B.w.map(() => 1), pt: [] };
 }
 function newGame(nm, st, unitId) {
+  const inv = {}; TER_ORDER.forEach(k => inv[k] = 0);
   g = {
     name: nm, lv: 1, exp: 0, pt: 0, cash: START_CASH, ap: AP_BASE, apMax: AP_BASE, day: 1,
     mor0: 100 + Math.floor((st.spi || 0) / 25),
-    st: st, sk: [], kills: 0, sorties: 0, wins: 0, losses: 0, downs: 0, fame: 0,
+    st: st,
+    sk: {},          /* 습득한 파일럿 스킬 { 키: 레벨 } */
+    eq: [],          /* 장착한 스킬 키 (최대 PSK_SLOT) */
+    parts: inv,      /* 상점에서 산 파츠 재고 { 지형키: 개수 } */
+    orders: [],      /* 발주 중인 기체 [{ id, due, price }] */
+    kills: 0, sorties: 0, wins: 0, losses: 0, downs: 0, fame: 0,
     garage: [mkOwned(unitId)], cur: 0, records: [], flags: { bossDown: false }
   };
   save();
@@ -199,10 +348,24 @@ function load() {
     const o = JSON.parse(localStorage.getItem(SAVEKEY) || 'null');
     if (!o || !o.garage || !o.garage.length || !UMAP[o.garage[0].id]) return false;
     g = o; if (!g.flags) g.flags = { bossDown: false };
-    if (!g.sk) g.sk = [];
+    /* 누락 필드 보정 — 세이브 버전을 올려도 구조가 조금씩 자란다 */
+    if (!g.sk || Array.isArray(g.sk)) g.sk = {};
+    if (!Array.isArray(g.eq)) g.eq = [];
+    g.eq = g.eq.filter(k => PSKMAP[k]).slice(0, PSK_SLOT);
+    if (!g.parts) { g.parts = {}; TER_ORDER.forEach(k => g.parts[k] = 0); }
+    TER_ORDER.forEach(k => g.parts[k] = g.parts[k] | 0);
+    if (!Array.isArray(g.orders)) g.orders = [];
+    g.orders = g.orders.filter(o => o && UMAP[o.id]);
     g.pt = g.pt | 0;
     g.garage = g.garage.filter(v => UMAP[v.id]);
-    g.garage.forEach(v => { if (!v.pt) v.pt = []; if (!v.mod.sct) v.mod.sct = 0; });
+    g.garage.forEach(v => {
+      if (!v.pt) v.pt = [];
+      if (!v.mod.sct) v.mod.sct = 0;
+      v.ulv = clamp(v.ulv | 0, 1, ULV_MAX) || 1;
+      v.uexp = v.uexp | 0; v.upt = v.upt | 0;
+      if (!v.inv) { v.inv = {}; UIK.forEach(k => v.inv[k] = 0); }
+      UIK.forEach(k => v.inv[k] = v.inv[k] | 0);
+    });
     g.cur = clamp(g.cur | 0, 0, g.garage.length - 1);
     return true;
   } catch (e) { return false; }
@@ -221,27 +384,31 @@ function adaptOf(v, k) {
 const adaptBase = (B, k) => (B.tr ? B.tr[k] : 0);
 const canSortie = (v, k) => adaptOf(v, k) > 0;
 
+/* 기체 레벨 투자분을 더한 소재값. 여기에 개조 배수가 곱해진다. */
+const uBase = (v, k) => (UMAP[v.id][k] || 0) + ((v.inv && v.inv[k]) | 0) * UINV_STEP[k];
 function uStat(v) {
   const B = UMAP[v.id], m = v.mod;
-  const cap = (x, k) => Math.min(UCAP[k], Math.round(x));
+  const cap = (x, k) => Math.min(UCAP[k], Math.max(0, Math.round(x)));
   return {
     B: B,
-    hpMax: cap(B.hp * (1 + m.hp * 0.05), 'hp'),
-    enMax: cap(B.en * (1 + m.en * 0.05), 'en'),
-    def: cap(B.def * (1 + m.def * 0.05), 'def'),
-    mob: cap(B.mob * (1 + m.mob * 0.05), 'mob'),
-    atk: cap(B.atk * (1 + m.atk * 0.05), 'atk'),
-    sct: cap((B.sct || 0) * (1 + (m.sct || 0) * 0.05), 'sct'),
+    hpMax: cap(uBase(v, 'hp') * (1 + m.hp * 0.05), 'hp'),
+    enMax: cap(uBase(v, 'en') * (1 + m.en * 0.05), 'en'),
+    def: cap(uBase(v, 'def') * (1 + m.def * 0.05), 'def'),
+    mob: cap(uBase(v, 'mob') * (1 + m.mob * 0.05), 'mob'),
+    atk: cap(uBase(v, 'atk') * (1 + m.atk * 0.05), 'atk'),
+    sct: cap(uBase(v, 'sct') * (1 + (m.sct || 0) * 0.05), 'sct'),
     modSum: Object.keys(MOD).reduce((a, k) => a + (m[k] | 0), 0)
   };
 }
+/* 그 항목이 이미 상한이라 포인트를 더 넣어도 소용없는가 */
+const uInvMaxed = (v, k) => uBase(v, k) >= UCAP[k];
 const wpowOf = (v, i) => { const w = UMAP[v.id].w[i]; const lv = clamp((v.wl && v.wl[i]) || 1, 1, w.pw.length); return w.pw[lv - 1]; };
 const wpMax = (v, i) => UMAP[v.id].w[i].pw.length;
 const morB = u => clamp(Math.floor((u.mor - 100) / 10), -4, 5);
 const morP = u => 1 + (u.mor - 100) * 0.005;
 const expNeed = lv => Math.round(100 * Math.pow(lv, 1.45));
 const wIsMelee = w => (w.tp || 'S').indexOf('M') >= 0;
-/* 각성 무장 — '특수' 속성을 가진 병장. 각성 능력치가 0 이면 아예 쓸 수 없다. */
+/* 각성 무장 — '특수' 속성을 가진 무장. 각성 능력치가 0 이면 아예 쓸 수 없다. */
 const wIsAwk = w => (w.at || '').indexOf('특수') >= 0;
 const statTotal = () => STK.reduce((a, k) => a + (g.st[k] | 0), 0);
 
@@ -257,6 +424,19 @@ function gainExp(n) {
   if (g.lv >= LV_MAX) g.exp = 0;
 }
 
+/* 기체 EXP — 출격한 탑승기만 받는다 (#1) */
+function gainUnitExp(v, n) {
+  v.uexp = (v.uexp | 0) + n;
+  const note = [];
+  while (v.ulv < ULV_MAX && v.uexp >= uExpNeed(v.ulv)) {
+    v.uexp -= uExpNeed(v.ulv); v.ulv++;
+    v.upt += ULVUP_PT;
+    note.push('UNIT LEVEL ' + v.ulv + ' — 기체 강화 포인트 +' + ULVUP_PT);
+  }
+  if (v.ulv >= ULV_MAX) v.uexp = 0;
+  return note;
+}
+
 /* =========================================================================
    전투 유닛 구성
    ========================================================================= */
@@ -267,26 +447,57 @@ const awkOf = u => clamp((u.st.awk | 0) + (u.awkTmp | 0), 0, STAT_MAX);
 function wRange(u, w) {
   const mn = Math.max(1, (w.mn | 0) * RANGE_MUL - 1);
   let mx = Math.max(mn, (w.mx | 0) * RANGE_MUL);
+  /* 사격·격투 전문가는 해당 계열 무장의 최대 사거리를 고정으로 1 늘린다 (#15) */
+  mx += wIsMelee(w) ? (u.rangeM || 0) : (u.rangeS || 0);
   if (wIsAwk(w)) mx = Math.min(AWK_RANGE_CAP, mx + Math.floor(awkOf(u) / 100));
   return { mn: mn, mx: mx };
 }
 const inRange = (u, w, d) => { const r = wRange(u, w); return d >= r.mn && d <= r.mx; };
 
+/* 기체명에 '건담'이 들어가는가 — 로스터 이름은 영문이라 양쪽을 다 본다 (#15 건담 마이스터) */
+const isGundamName = B => /건담|gundam/i.test(B.nm || '') || /건담|gundam/i.test(B.mdl || '');
+
+/* 파일럿 스킬을 반영한 실효 능력치. 화면에서도 같은 값을 보여준다. */
+function effStats(B) {
+  const e = skillEffect({ eq: g.eq, sk: g.sk, plv: g.lv, isGundam: B ? isGundamName(B) : false });
+  const pen = penMulOf(g.st.spi, e);
+  const st = {};
+  STK.forEach(k => st[k] = clamp(Math.round(g.st[k] * (1 + e.st[k] - e.pst[k] * pen)), 0, STAT_MAX));
+  if (e.awkZero) st.awk = 0;      /* 올드타입 */
+  return { st: st, e: e, pen: pen };
+}
+
 function mkPlayer(tac, ter) {
   const v = cur(), s = uStat(v), B = s.B, T = TACTIC[tac];
-  const ad = adaptOf(v, ter), tm = terMul(ad);
+  const E = effStats(B), e = E.e, pen = E.pen;
+  const ad = adaptOf(v, ter);
+  /* 지형 △ 의 −15% 도 '기체에 부여되는 패널티'라 정신·포커페이스가 깎아 준다 (#14) */
+  const tm = ad >= 2 ? 1 : 1 - (1 - terMul(ad)) * pen;
+  /* 전법의 음(−) 보정만 완화한다. 양(+) 보정은 그대로 둔다. */
+  const pw = T.pw < 1 ? 1 - (1 - T.pw) * pen : T.pw;
+  const tak = T.tak > 1 ? 1 + (T.tak - 1) * pen : T.tak;
+  const hitMod = T.hit < 0 ? T.hit * pen : T.hit;
   return {
     side: 'p', id: B.id, nm: B.nm, mdl: B.mdl, img: B.img, th: B.th, large: B.lg,
     hp: v.hp, hpMax: s.hpMax, en: s.enMax, enMax: s.enMax,
     atk: Math.round(s.atk * tm), def: s.def, mob: Math.round(s.mob * tm), sct: s.sct,
-    adapt: ad,
-    st: Object.assign({}, g.st), awkTmp: 0, mor: g.mor0,
-    pwMul: T.pw, takMul: T.tak, hitMod: T.hit, evaMod: T.eva || 0,
+    atk0: Math.round(s.atk * tm), def0: s.def, mob0: Math.round(s.mob * tm),
+    adapt: ad, terMulNow: tm,
+    st: E.st, awkTmp: 0, mor: g.mor0, pen: pen,
+    rangeS: e.rangeS, rangeM: e.rangeM,
+    reaper: e.reaper, opening: e.opening, seedP: e.seedP, seedOn: false, guts: 0,
+    foeReaDown: e.foe.rea,
+    pwMul: pw, takMul: tak, hitMod: hitMod, evaMod: T.eva || 0,
     hidden: false, exposed: false,
-    weps: B.w.map((w, i) => ({ i: i, n: w.n, pw: wpowOf(v, i), ac: w.ac, cr: w.cr, en: w.en | 0, am: w.am, ammo: w.am || 0, tp: w.tp, at: w.at, pre: w.pre, mn: w.mn, mx: w.mx }))
+    weps: B.w.map((w, i) => ({
+      i: i, n: w.n, pw: wpowOf(v, i), ac: w.ac, cr: w.cr,
+      /* 사격·격투 전문가의 EN 경감 */
+      en: Math.max(0, Math.round((w.en | 0) * (1 - (wIsMelee(w) ? e.enM : e.enS)))),
+      am: w.am, ammo: w.am || 0, tp: w.tp, at: w.at, pre: w.pre, mn: w.mn, mx: w.mx
+    }))
   };
 }
-function mkFoe(B, elite, boss, idx, diff, ter) {
+function mkFoe(B, elite, boss, idx, diff, ter, charm) {
   /* 적 파일럿 능력치는 플레이어의 실제 능력 총합에 맞춰 잡는다.
      공격 능력과 회피 능력을 분리해야 한다. 한 값으로 둘 다 올리면 정예기가
      '절대 안 맞고 절대 안 빗나가는' 무적이 되어 전투가 성립하지 않는다. */
@@ -307,9 +518,13 @@ function mkFoe(B, elite, boss, idx, diff, ter) {
     atk: Math.round(B.atk * atm * tm * (boss ? 1.45 : 1)),
     def: Math.round(B.def * (boss ? 1.15 : 1)), mob: Math.round(B.mob * tm), sct: B.sct || 0,
     adapt: ad,
-    st: { sho: off, mel: off, def: Math.round(base * 0.9), rea: eva, awk: Math.round(base * (boss ? 1.1 : elite ? 0.8 : 0.4)), spi: Math.round(base * 0.5) },
+    st: { sho: off, mel: off, def: Math.round(base * 0.9),
+          /* 카리스마는 적 반응을 깎는다 (#15) */
+          rea: Math.max(1, Math.round(eva * (1 - (charm || 0)))),
+          awk: Math.round(base * (boss ? 1.1 : elite ? 0.8 : 0.4)), spi: Math.round(base * 0.5) },
     awkTmp: 0,
     mor: elite || boss ? 110 : 100,
+    pen: 1, rangeS: 0, rangeM: 0, reaper: 0, opening: 0, seedP: 0, seedOn: false, guts: 0,
     pwMul: 1, takMul: 1, hitMod: 0, evaMod: 0,
     hidden: false, exposed: false,
     weps: B.w.map((w, i) => ({ i: i, n: w.n, pw: w.pw[clamp(wl, 1, w.pw.length) - 1], ac: w.ac, cr: w.cr, en: w.en | 0, am: w.am, ammo: (w.am || 0) * 3, tp: w.tp, at: w.at, pre: w.pre, mn: w.mn, mx: w.mx })),
@@ -321,7 +536,7 @@ function mkFoe(B, elite, boss, idx, diff, ter) {
 const uname = u => u.nm + (u.tag ? ' 〈' + u.tag + '〉' : '') + (u.idx > 0 ? ' #' + (u.idx + 1) : '');
 
 /* ---- 판정 ---- */
-/* EN 이 0 이면 어떤 병장도 쓸 수 없다 (#23). 각성이 0 이면 각성 무장을 쓸 수 없다 (#1). */
+/* EN 이 0 이면 어떤 무장도 쓸 수 없다 (#23). 각성이 0 이면 각성 무장을 쓸 수 없다 (#1). */
 function usable(u, w) {
   if (u.en <= 0) return false;
   if (w.en && u.en < w.en) return false;
@@ -334,8 +549,10 @@ const armed = (u, d) => u.weps.some(w => usable(u, w) && inRange(u, w, d));
 function calcDmg(A, D, w) {
   const stat = wIsMelee(w) ? A.st.mel : A.st.sho;
   const atkv = A.atk * (1 + stat * ATK_STAT_K) * morP(A) * A.pwMul;
-  const defv = D.def * (1 + D.st.def * DEF_STAT_K) * (1 + (D.mor - 100) * 0.002);
-  let d = w.pw * (atkv / Math.max(1, defv)) * DMG_K * D.takMul * (D.desperate ? 1.12 : 1);
+  const defv = D.def * (1 + D.st.def * DEF_STAT_K) * (1 + (D.mor - 100) * 0.002)
+             * (D.guts > 0 ? GUTS_MUL : 1);                       /* 저력 — 방어력 +30% */
+  let d = w.pw * (atkv / Math.max(1, defv)) * DMG_K * D.takMul
+        * (D.desperate ? 1 + 0.12 * (D.pen || 1) : 1);
   if (A.side === 'e') d *= FOE_DMG;
   if (D.large) d *= 1.06;
   return Math.max(200, Math.round(d / 10) * 10);
@@ -350,10 +567,20 @@ function hitAdv(A, D, w) {
   const sct = clamp(Math.floor((A.sct - D.sct) / 250), -3, 3);
   const off = Math.floor(stat / STAT_HIT_K) + morB(A) + A.hitMod + acc + sct + (aw ? Math.floor(awkOf(A) / 100) : 0);
   const dfn = Math.floor(D.st.rea / STAT_HIT_K) + morB(D) + Math.floor(D.mob / MOB_EVA_K) + (D.evaMod || 0)
-    + (aw ? Math.floor(awkOf(D) / 100) : 0) + (D.large ? -1 : 0) + (D.desperate ? -2 : 0);
-  return clamp(off - dfn, -HIT_CLAMP, HIT_CLAMP);
+    + (aw ? Math.floor(awkOf(D) / 100) : 0)
+    + (D.large ? -1 * (D.pen || 1) : 0)            /* 대형기 회피 패널티도 정신이 깎는다 */
+    + (D.desperate ? -2 * (D.pen || 1) : 0);
+  let a = clamp(off - dfn, -HIT_CLAMP, HIT_CLAMP);
+  /* 저력 — 명중률·회피율 30% (#14). 확률에 배수를 걸고 우열값으로 되돌린다. */
+  if (A.guts > 0) a = advScale(a, GUTS_MUL);
+  if (D.guts > 0) a = advScale(a, 1 / GUTS_MUL);
+  return clamp(a, -HIT_CLAMP - 2, HIT_CLAMP + 2);
 }
-const critNeed = (A, D, w) => clamp(9 - Math.floor((wIsMelee(w) ? A.st.mel : A.st.sho) / 60) + Math.floor(D.st.rea / 90) - Math.round((w.cr || 0) / 5), 3, 12);
+/* 정신이 크리티컬 확률을 보정한다 (#14) */
+const critNeed = (A, D, w) => clamp(
+  9 - Math.floor((wIsMelee(w) ? A.st.mel : A.st.sho) / 60)
+    - Math.floor((A.st.spi | 0) / SPI_CRIT_K)
+    + Math.floor(D.st.rea / 90) - Math.round((w.cr || 0) / 5), 3, 12);
 
 /* 미래 예측 (#1) — 각성 800 이상일 때 5% */
 const foresee = u => awkOf(u) >= AWK_FORESEE && Math.random() < AWK_FORESEE_P;
@@ -374,7 +601,7 @@ function chooseWep(A, D, dist) {
 /* 거리 조정 속도 — 기체 기동과 파일럿 반응에서 나온다 (#12) */
 const mvSpd = u => clamp(2 + Math.floor(u.mob / 300) + Math.floor(u.st.rea / 120), 2, 9);
 
-/* 자기 병장이 닿는 구간 중 현재 거리에서 가장 가까운 지점 */
+/* 자기 무장이 닿는 구간 중 현재 거리에서 가장 가까운 지점 */
 function wantBand(u) {
   let lo = null, hi = null;
   u.weps.forEach(w => {
@@ -389,15 +616,16 @@ function wantBand(u) {
 function wantDir(u, dist, iCan, foeCan) {
   if (iCan && !foeCan) return 0;              /* 우위 — 이 사거리를 최대한 유지한다 */
   const b = wantBand(u);
-  if (!b) return foeCan ? 1 : 0;              /* 쓸 병장이 없다 — 일단 벌린다 */
+  if (!b) return foeCan ? 1 : 0;              /* 쓸 무장이 없다 — 일단 벌린다 */
   if (dist < b.lo) return 1;
   if (dist > b.hi) return -1;
   return 0;
 }
 
-/* 적 발견 판정 — 색적이 높을수록, 상대 기동·반응이 낮을수록 먼저 본다 */
-const spotBon = u => Math.floor(u.sct / 100) + Math.floor(u.st.rea / 40);
-const hideBon = u => Math.floor(u.mob / 220) + Math.floor(u.st.rea / 40);
+/* 적 발견 판정 — 적 발견은 온전히 색적의 영역이다 (#13).
+   반응은 여기서 빠지고 회피·거리 싸움·명중에만 관여한다. */
+const spotBon = u => Math.floor(u.sct / 60);
+const hideBon = u => Math.floor(u.mob / 130);
 
 /* =========================================================================
    전투 진행
@@ -469,7 +697,15 @@ async function runBattle(ms, tac, ter) {
   renderAll();
 
   const P = mkPlayer(tac, ter);
-  const foes = buildFoes(ms, ter);
+  const foes = buildFoes(ms, ter, P.foeReaDown);
+
+  /* 오퍼레이션 메테오 — 개시 10턴간 기체 제원 상승 (#15) */
+  const OPEN_TURN = 10;
+  if (P.opening > 0) {
+    P.atk = Math.round(P.atk0 * (1 + P.opening));
+    P.def = Math.round(P.def0 * (1 + P.opening));
+    P.mob = Math.round(P.mob0 * (1 + P.opening));
+  }
   const nameCount = {};
   foes.forEach(f => nameCount[f.nm] = (nameCount[f.nm] || 0) + 1);
   const seen = {};
@@ -481,6 +717,10 @@ async function runBattle(ms, tac, ter) {
   bl('━━ <b>' + ms.n + '</b> ━━ <span class="dm">전장 ' + TERRAIN[ter].n + '</span>', 'sys');
   bl('전법 ' + TACTIC[tac].n + ' / 탑승기 ' + P.nm + ' <span class="dm">(' + P.mdl + ')</span>' +
     ' <span class="' + (P.adapt >= 2 ? 'li' : 'ye') + '">지형 적성 ' + ADAPT_MARK[P.adapt] + (P.adapt < 2 ? ' — 공격·기동 85%' : '') + '</span>', 'sys');
+  if ((g.eq || []).length) bl('장착 스킬 ' + g.eq.map(k => PSKMAP[k].n +
+    (PSKMAP[k].nolv ? '' : ' Lv' + pskLv(k))).join(' · '), 'sys');
+  if (P.opening > 0) bl('<b class="pk">오퍼레이션 메테오</b> — 개시 ' + OPEN_TURN +
+    '턴간 기체 공격·방어·기동 +' + Math.round(P.opening * 100) + '%', 'fore');
   bl('적 편성 ' + foes.map(f => uname(f)).join(' , '), 'sys');
   bl('조우 거리 <b class="ye">' + dist + '</b> — ' + (armed(P, dist) ? '사거리 내' : '<span class="rd">사거리 밖</span>'), 'sys');
 
@@ -498,8 +738,34 @@ async function runBattle(ms, tac, ter) {
     const live = () => foes.filter(f => f.hp > 0);
     bl('── ROUND ' + round + ' ──', 'rnd');
 
-    /* 1) EN 자동 회복 (#23) */
-    [P].concat(live()).forEach(u => { u.en = Math.min(u.enMax, u.en + Math.ceil(u.enMax * EN_REGEN)); });
+    /* 1) EN 자동 회복 (#23) · 지속 효과 감쇠 */
+    [P].concat(live()).forEach(u => {
+      u.en = Math.min(u.enMax, u.en + Math.ceil(u.enMax * EN_REGEN));
+      if (u.guts > 0) u.guts--;
+    });
+    if (P.opening > 0 && round === OPEN_TURN + 1) {
+      P.atk = P.atk0; P.def = P.def0; P.mob = P.mob0;
+      bl('오퍼레이션 메테오 효과가 끝났다.', 'sys');
+    }
+
+    /* 1-b) SEED (#15) — 매 턴 판정, 발동하면 전투 종료까지 각성·반응 +20% */
+    if (!P.seedOn && P.seedP > 0 && Math.random() < P.seedP) {
+      P.seedOn = true;
+      P.st.awk = clamp(Math.round(P.st.awk * (1 + SEED_BONUS)), 0, STAT_MAX);
+      P.st.rea = clamp(Math.round(P.st.rea * (1 + SEED_BONUS)), 0, STAT_MAX);
+      bl('<b class="pk">〔SEED〕</b> — 세계가 느려진다. 각성·반응 +' +
+        Math.round(SEED_BONUS * 100) + '% <span class="dm">(전투 종료까지)</span>', 'fore');
+    }
+
+    /* 1-c) 저력 (#14) — HP 30% 이하에서 정신으로 판정. 적기도 같은 규칙을 탄다. */
+    [P].concat(live()).forEach(u => {
+      if (u.guts > 0 || u.hp / u.hpMax > GUTS_HP) return;
+      if (Math.random() >= gutsP(u.st.spi | 0)) return;
+      u.guts = GUTS_TURN;
+      bl('<b class="og">〔저력〕</b> — ' + esc(uname(u)) + ' 이(가) 버텨낸다. ' +
+        GUTS_TURN + '턴간 명중률·회피율·방어력 +' + Math.round((GUTS_MUL - 1) * 100) + '%',
+        u.side === 'p' ? 'fore' : 'sys');
+    });
 
     /* 2) 거리 싸움 — 공격 수단이 없는 쪽은 수비를 희생해서라도 사거리를 잡으러 간다 */
     const pCan = armed(P, dist);
@@ -575,12 +841,14 @@ async function runBattle(ms, tac, ter) {
         : P;
       const w = chooseWep(A, D, dist);
       if (!w) {
-        bl(esc(uname(A)) + ' — 거리 ' + dist + '에서 <span class="dm">쓸 수 있는 병장이 없다.</span>' +
+        bl(esc(uname(A)) + ' — 거리 ' + dist + '에서 <span class="dm">쓸 수 있는 무장이 없다.</span>' +
           (A.en <= 0 ? ' <span class="rd">EN 고갈</span>' : ''), 'mis');
         await sleep(140); continue;
       }
       if (w.en) A.en = Math.max(0, A.en - w.en);
       if (w.am) w.ammo--;
+      /* 사신 (#15) — 시야에서 사라진 상태에서 쏘는 첫 발은 확률로 크리티컬 확정 */
+      const reap = A.hidden && (A.reaper || 0) > 0 && Math.random() < A.reaper;
       A.hidden = false; A.exposed = true;      /* 쏘면 위치가 드러난다 */
 
       paintBoard(P, foes, A, dist, ter);
@@ -592,13 +860,15 @@ async function runBattle(ms, tac, ter) {
       const adv = hitAdv(A, D, w), cn = critNeed(A, D, w);
       const ra = r2(), rd = r2(), mg = (ra.t + adv) - rd.t;
       let hit = mg >= 0;
+      if (reap) hit = true;
       if (foreA) hit = true;
       if (foreD) hit = false;
-      const crit = hit && (mg >= cn || (foreA && mg >= cn));
+      const crit = hit && (reap || mg >= cn);
       const head = '<span class="' + (A.side === 'p' ? 'cy' : 'mg') + '">' + esc(uname(A)) + '</span> ' + esc(w.n) +
         (wIsAwk(w) ? ' <span class="pk">〔각성〕</span>' : '') +
         ' <span class="dm">[' + ra.a + '+' + ra.b + (adv >= 0 ? '+' : '') + adv + '=' + (ra.t + adv) + ' vs ' + rd.a + '+' + rd.b + '=' + rd.t + ']</span>';
 
+      if (reap) bl('<b class="pk">〔사신〕</b> — ' + esc(uname(A)) + ' 사각에서의 일격. <b>크리티컬 확정</b>', 'fore');
       if (foreA) bl('<b class="pk">「거기냣!」</b> — ' + esc(uname(A)) + ' 미래 예측 발동. <b>절대 명중</b>', 'fore');
       if (foreD) bl('<b class="pk">「보인다!」</b> — ' + esc(uname(D)) + ' 미래 예측 발동. <b>절대 회피</b>', 'fore');
 
@@ -656,6 +926,8 @@ async function runBattle(ms, tac, ter) {
   g.cash += pay;
   g.lvupNote = [];
   gainExp(exp);
+  /* 출격한 탑승기도 함께 성장한다 (#1) */
+  g.lvupNote = g.lvupNote.concat(gainUnitExp(cur(), exp));
   g.records.unshift({ day: g.day, m: ms.n, t: ter, r: result, kills: downed.length, pay: pay, exp: exp, hp: Math.round(cur().hp / uStat(cur()).hpMax * 100) });
   g.records = g.records.slice(0, 40);
   save();
@@ -670,23 +942,23 @@ async function runBattle(ms, tac, ter) {
 }
 
 /* 전장에 적성이 있는 기체만 편성된다 (#15) */
-function buildFoes(ms, ter) {
+function buildFoes(ms, ter, charm) {
   const out = [], df = ms.diff || 1;
   const poolOf = rar => UNITS.filter(u => u.rar === rar && u.w.length && adaptBase(u, ter) > 0);
   const any = UNITS.filter(u => u.w.length && adaptBase(u, ter) > 0);
   for (let i = 0; i < ms.cnt - (ms.ace ? 1 : 0); i++) {
     const p = poolOf(pick(ms.pool));
     const src = p.length ? p : any;
-    if (src.length) out.push(mkFoe(pick(src), false, false, 0, df, ter));
+    if (src.length) out.push(mkFoe(pick(src), false, false, 0, df, ter, charm));
   }
   if (ms.ace) {
     const p = poolOf(ms.ace), src = p.length ? p : any;
     if (src.length) {
       const b = ms.boss ? src.slice().sort((a, c) => (c.hp + c.atk * 40) - (a.hp + a.atk * 40))[rint(0, Math.min(4, src.length - 1))] : pick(src);
-      out.push(mkFoe(b, true, !!ms.boss, 0, df, ter));
+      out.push(mkFoe(b, true, !!ms.boss, 0, df, ter, charm));
     }
   }
-  return out.length ? out : [mkFoe(pick(any.length ? any : UNITS), false, false, 0, df, ter)];
+  return out.length ? out : [mkFoe(pick(any.length ? any : UNITS), false, false, 0, df, ter, charm)];
 }
 
 /* =========================================================================
