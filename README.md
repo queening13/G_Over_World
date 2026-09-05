@@ -5,7 +5,7 @@ FF ADVENTURE 계열 **2d6 대항판정**으로 전투를 굴리고, 기체 제�
 **GGen Eternal Database** 공개 API에서 가져온 실제 데이터를 쓴다.
 
 수록 기체 **1244기 전부**. 결과물은 `docs/` 폴더 하나(약 143MB)이고,
-그대로 **GitHub Pages 에 올리거나** 로컬에서 `index.html` 을 열어 실행한다.
+그대로 **GitHub Pages 나 Vercel 에 올리거나** 로컬에서 `index.html` 을 열어 실행한다.
 외부 의존은 Google Fonts 스타일시트뿐이며, 실패해도 시스템 폰트로 대체된다.
 
 ---
@@ -18,7 +18,7 @@ FF ADVENTURE 계열 **2d6 대항판정**으로 전투를 굴리고, 기체 제�
 4. [데이터 파이프라인](#4-데이터-파이프라인)
 4-5. [한글화](#45-한글화)
 5. [빌드](#5-빌드)
-6. [실행 · GitHub Pages 배포](#6-실행과-검증)
+6. [실행 · 배포(GitHub Pages · Vercel)](#6-실행과-검증)
 7. [게임 설계 명세](#7-게임-설계-명세)
 8. [전투 규칙 전문](#8-전투-규칙-전문)
 9. [밸런스 — 상수와 근거](#9-밸런스--상수와-근거)
@@ -82,6 +82,7 @@ node src/fetch-roster.mjs --limit=3 && node build.mjs
 ├── build.mjs              조각들을 docs/index.html 로 합침
 ├── serve.mjs              docs/ 를 정적 서버로 띄움 (Pages 와 같은 조건)
 ├── package.json           npm run fetch / build / serve
+├── vercel.json            Vercel 배포 설정 (outputDir·캐시 헤더)
 ├── README.md              이 문서
 ├── docs/                  ← 배포 대상. 통째로 GitHub Pages 에 올린다
 │   ├── index.html         0.86MB — 코드 + 1244기 데이터 인라인
@@ -406,6 +407,44 @@ git push -u origin main
 `docs/.nojekyll` 이 있어야 Jekyll 이 `_` 로 시작하는 경로를 지우지 않는다.
 `.gitignore` 는 `node_modules/` 와 중간 캐시를 제외하고 `docs/` 는 **커밋에 포함한다**
 (Pages 가 빌드 결과물을 그대로 서빙하므로 산출물이 저장소에 있어야 한다).
+
+### Vercel 배포
+
+`vercel.json` 이 저장소에 들어 있어 별도 설정 없이 연결만 하면 된다.
+
+1. [vercel.com/new](https://vercel.com/new) → GitHub 계정 연결 → `G_Over_World` 선택
+2. 설정 화면은 **그대로 두고 Deploy**
+   (`vercel.json` 이 Output Directory `docs`, 빌드 명령 없음을 이미 지정한다)
+3. 1~2분 뒤 `https://<프로젝트명>.vercel.app` 에서 열린다
+
+이후 `git push` 할 때마다 자동 재배포되고, 브랜치마다 프리뷰 URL이 따로 생긴다.
+
+```json
+{
+  "outputDirectory": "docs",
+  "buildCommand": null,
+  "headers": [{
+    "source": "/(img|th)/(.*)",
+    "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
+  }]
+}
+```
+
+**이미지에 1년 불변 캐시를 거는 것이 Vercel 을 쓰는 실질적 이유다.**
+파일명이 기체 ID 라 내용이 절대 바뀌지 않으므로 안전하고, 재방문자는
+이미지 재검증 요청이 아예 사라진다. GitHub Pages 는 모든 파일에
+`max-age=600` 이 고정이라 이 설정이 불가능하다.
+
+#### 대역폭
+
+둘 다 월 100GB. 이 사이트는 **한 명이 전 기체를 열람해도 143MB** 가 상한이라
+5인이 매일 놀아도 월 1~4GB(한도의 1~4%)다. 사실상 제약이 아니다.
+
+| 1인 1세션 (캐시 없는 첫 접속) | 사용량 |
+|---|---|
+| 가볍게 — 전투 20회 | 8MB |
+| 보통 — 전투 30회 + 도감 한 바퀴 | 24MB |
+| 이론상 최대 — 1244기 전부 열람 | 143MB |
 
 ### 세이브 초기화
 
