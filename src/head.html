@@ -76,18 +76,19 @@ img{display:block}
 .gg i.hp{background:repeating-linear-gradient(90deg,#28d428 0 3px,#1fb01f 3px 4px)}
 .gg i.hp.w{background:repeating-linear-gradient(90deg,#e8c022 0 3px,#c0a01c 3px 4px)}
 .gg i.hp.c{background:repeating-linear-gradient(90deg,#e03a3a 0 3px,#b02c2c 3px 4px)}
-.gg i.en{background:repeating-linear-gradient(90deg,#2aa8e0 0 3px,#2288b8 3px 4px)}
+.gg i.en{background:repeating-linear-gradient(90deg,#ff9d2e 0 3px,#c9761d 3px 4px)}
 .gg i.ex{background:repeating-linear-gradient(90deg,#c86ce0 0 3px,#a054b8 3px 4px)}
 .gg i.ap{background:repeating-linear-gradient(90deg,#e0a02a 0 3px,#b88020 3px 4px)}
 .gg span{position:absolute;inset:0;text-align:center;font-family:var(--f-mn);font-size:10px;
   line-height:9px;color:#fff;text-shadow:1px 1px 0 #000,0 0 3px #000}
 
-/* 기체 이미지 — 초상화(288px 원본)라 여백을 잘라내지 않고 contain 으로 담는다 */
+/* 기체 이미지 — 초상화 원본(936x803)이라 여백을 잘라내지 않고 contain 으로 담는다.
+   가로세로 비율을 초상화에 맞춰 잡아 같은 자리에서 최대한 크게 보이게 한다. */
 .ui{background:#0a0a14;border:1px solid var(--bd);flex:none;object-fit:contain}
-.ui.s{width:44px;height:44px}
-.ui.m{width:72px;height:72px}
-.ui.l{width:104px;height:104px}
-.ui.xl{width:132px;height:132px}
+.ui.s{width:64px;height:56px}
+.ui.m{width:124px;height:106px}
+.ui.l{width:100%;max-width:264px;height:212px}
+.ui.xl{width:100%;max-width:240px;height:206px}
 
 #cmdbar{border-top:1px solid var(--bd);background:linear-gradient(180deg,#000c26,#000);
   padding:7px 8px;display:flex;flex-wrap:wrap;gap:2px 0}
@@ -133,19 +134,19 @@ button:hover .urow .un{color:var(--yel)}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* 도감 그리드 */
-.ugrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:5px;margin-bottom:8px}
+.ugrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:5px;margin-bottom:8px}
 .ucard{border:1px solid var(--bd);background:var(--row2);padding:5px;display:flex;gap:6px;align-items:center;width:100%}
 .ucard:hover{background:#151534;border-color:var(--bdhot)}
 .ucard .cn{font-size:11.5px;color:var(--lnk);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ucard:hover .cn{color:var(--yel)}
-.ucard .cs{font-family:var(--f-mn);font-size:9.5px;color:var(--dim)}
+.ucard .cs{font-family:var(--f-mn);font-size:10px;color:var(--dim)}
 
 /* 전투 — 교전 표시부 */
-.duel{display:grid;grid-template-columns:1fr 92px 1fr;align-items:center;gap:8px;
+.duel{display:grid;grid-template-columns:1fr 96px 1fr;align-items:center;gap:8px;
   border:1px solid var(--bdhot);background:linear-gradient(180deg,#0e0e22,#050508);
-  padding:8px 10px;margin-bottom:6px;min-height:150px}
-.duel .side{display:flex;gap:8px;align-items:center;min-width:0}
-.duel .side.r{flex-direction:row-reverse}
+  padding:8px 10px;margin-bottom:6px;min-height:236px}
+.duel .side{display:flex;flex-direction:column;gap:5px;align-items:stretch;min-width:0}
+.duel .side.r{align-items:stretch}
 .duel .side.r .info{text-align:right}
 .duel .info{min-width:0;flex:1}
 .duel .dn{font-size:12px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -208,6 +209,49 @@ input[type=text],select{background:#000;border:1px solid var(--bd);color:var(--t
   font-family:var(--f-mn);font-size:12px;padding:2px 5px}
 input:focus,select:focus{border-color:var(--cy);outline:none}
 
+
+/* ---- 능력 분배 위젯 ---- */
+.sbtn{display:inline-block;border:1px solid var(--bd);background:#0e0e20;color:var(--lnk);
+  font-family:var(--f-mn);font-size:11px;padding:0 6px;margin-left:3px;min-width:32px;text-align:center}
+.sbtn:hover{background:#1a1a3a;color:var(--yel);border-color:var(--bdhot)}
+.alv{display:inline-block;min-width:38px;font-family:var(--f-mn);font-size:13px;color:var(--yel)}
+.sd{display:block;font-size:10.5px;margin-top:1px;font-family:var(--f-ui)}
+
+/* ---- 지형 적성 ---- */
+.ter{display:flex;flex-wrap:wrap;gap:0 7px;font-family:var(--f-mn);font-size:10.5px;margin-top:2px}
+.ter b{font-weight:400}
+.a0{color:#5a5a6a} .a1{color:var(--yel)} .a2{color:var(--lime)}
+.cbtn.bad{color:#5a5a68}
+.cbtn small.a2{color:var(--lime)} .cbtn small.a1{color:var(--yel)} .cbtn small.a0{color:var(--red)}
+
+/* ---- 각성 / 미래 예측 ---- */
+.pk{color:#c98cff}
+.note.pk2{border-color:#6a4a9a;color:#c98cff}
+.note.pk2 b{color:#e0b6ff}
+
+/* ---- 교전 거리 표시 ---- */
+.dline{border:1px solid var(--bd);background:#05050a;padding:4px 8px;margin-bottom:6px;
+  font-family:var(--f-mn);font-size:11.5px}
+.dbar{position:relative;height:7px;border:1px solid var(--bd2);background:
+  repeating-linear-gradient(90deg,#12121e 0 1px,transparent 1px 5%);margin-top:3px}
+.dbar i{position:absolute;top:-2px;width:3px;height:9px;background:var(--yel);
+  box-shadow:0 0 6px var(--yel);transition:left .3s}
+.duel .mid .fore{font-family:var(--f-dp);font-size:12px;color:#c98cff;margin-top:3px;line-height:1.15}
+
+/* ---- 선택된 행 / 격납고 행 ---- */
+.selrow{background:#151534!important;box-shadow:inset 3px 0 0 var(--yel)}
+.grow{display:block;padding:5px 8px;border-bottom:1px solid var(--bd2);background:var(--row2)}
+
+/* ---- 좌측 탑승기 사진 칸 ---- */
+.tb td.pic{padding:5px;text-align:center}
+.tb td.pic .nmL{font-size:12.5px;line-height:1.3;margin-top:3px}
+.dm.sm,.sm{font-size:10.5px}
+
+.bu.hid{opacity:.5;filter:grayscale(.6)}
+#blog .l.dst{color:#8fd0ff}
+#blog .l.sct{color:#9a8fd0}
+#blog .l.fore{color:#c98cff;font-weight:700}
+
 @media (max-width:860px){
   #frames{grid-template-columns:1fr}
   #lft{border-right:none;border-bottom:1px solid var(--bd)}
@@ -222,11 +266,12 @@ input:focus,select:focus{border-color:var(--cy);outline:none}
 <div id="wrap">
   <div id="notice">
     <div class="row">【필독】 ※ 본 게임은 <b>FF ADVENTURE</b> 계열 2d6 대항판정 규칙으로 동작합니다. 진행 상황은 브라우저에 자동 저장됩니다.</div>
-    <div class="row">【안내】 ※ 행동력을 모두 소진하면 <b>【다음 날】</b>로 넘어가며 부대 유지비가 청구됩니다.</div>
+    <div class="row">【안내】 ※ 행동력을 모두 소진하면 <b>【다음 날】</b>로 넘어가며 부대 유지비가 청구되고 <b>암시장</b> 매물이 초기화됩니다.</div>
+    <div class="row">【전투】 ※ <b>전장 적성</b>·<b>교전 거리(1~20)</b>·<b>색적</b>·<b>EN</b>이 승패를 가릅니다. 각성 800 이상이면 <b>미래 예측</b>이 발동합니다.</div>
   </div>
   <div id="head">
     <div>
-      <div class="ttl">G-Over <i>World</i><span class="ver">v3.0 / 2d6 SYSTEM</span></div>
+      <div class="ttl">G-Over <i>World</i><span class="ver">v4.0 / 2d6 SYSTEM</span></div>
       <div class="dm mn" style="font-size:10.5px">G-OVER WORLD — PILOT SERVICE RECORD</div>
     </div>
     <div class="sys">

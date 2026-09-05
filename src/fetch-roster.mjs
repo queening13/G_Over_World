@@ -87,6 +87,17 @@ function chooseRoster(rows) {
    맵 병기와 SSP 전용 병기는 이 게임에 사거리/맵 개념이 없으므로 제외.
    무장은 최종 레벨 위력 기준 상위 6종만 남긴다. */
 const TYPE = { melee: 'M', shooting: 'S' };
+
+/* 지형 적성 — API 는 level 3(●) / 2(▲) / 1(-) 로 준다.
+   게임에서는 2=○(100%) / 1=△(공격·기동 85%) / 0=출격 불가 로 쓴다. */
+const TERKEY = { Space: 'sp', Atmospheric: 'ai', Ground: 'gr', Sea: 'se', Underwater: 'uw' };
+
+/* 기체 능력치 규격
+   - 공격·방어·기동은 원본의 10%(소수점 버림), 상한 9999
+   - HP 상한 999999 · EN 상한 999
+   - 색적은 원본 데이터에 없다. 기동·EN·이동력에서 파생시킨다. */
+const S10 = v => Math.min(9999, Math.floor((v | 0) * 0.1));
+const scoutOf = (mob, en, mov) => Math.min(9999, Math.round(mob * 0.55 + en * 0.9 + mov * 30));
 async function detail(r) {
   const d = await api(`/api/unit/${r.id}?lang=${LANG}`);
   const weps = (d.weapons || [])
@@ -110,13 +121,20 @@ async function detail(r) {
     n: trAbilityName(a.display_name || a.name),
     d: trAbilityDetail(((a.details && a.details[0] && a.details[0].text) || '').slice(0, 160))
   }));
+  const tr = { sp: 0, ai: 0, gr: 0, se: 0, uw: 0 };
+  (d.terrain || []).forEach(t => {
+    const k = TERKEY[t.name];
+    if (k) tr[k] = Math.max(0, Math.min(2, (t.level | 0) - 1));
+  });
+  const mob = S10(r.MOB), en = Math.min(999, r.EN | 0), mov = r.MOV | 0;
   return {
     id: r.id,
     nm: NAME_PREFIX + (d.name || r.name),
     mdl: d.model || '',
     sr: trSeries((d.series && d.series[0] && d.series[0].name) || ''),
-    rar: r.rarity, role: r.role,
-    hp: r.HP, atk: r.ATK, def: r.DEF, en: r.EN, mob: r.MOB, mov: r.MOV,
+    rar: r.rarity,
+    hp: Math.min(999999, r.HP | 0), atk: S10(r.ATK), def: S10(r.DEF), en: en, mob: mob,
+    sct: scoutOf(mob, en, mov), tr: tr,
     lg: !!d.is_large, w: weps, ab: abs,
     /* 두 규격을 모두 받는다.
        pic  초상화 936x803 · 약 140KB — 전투·도시에·도감 상세용
@@ -195,6 +213,7 @@ console.log('\n등급별 중앙값 —');
     'DEF', String(med(u => u.def)).padStart(6),
     'MOB', String(med(u => u.mob)).padStart(6),
     'EN', String(med(u => u.en)).padStart(4),
+    'SCT', String(med(u => u.sct)).padStart(5),
     'topPW', String(med(u => u.w[0] ? u.w[0].pw[u.w[0].pw.length - 1] : 0)).padStart(6),
     '무장', med(u => u.w.length));
 });
