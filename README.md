@@ -588,10 +588,30 @@ Atlas 화면의 **Browse Collections** 에서 `gover.saves` 에 문서가 생긴
 
 | 증상 | 원인 |
 |---|---|
+| `Invalid scheme, expected connection string to start with "mongodb://"` | **`.env` 에 `MONGODB_URI=` 가 두 번 들어갔다** — 아래 참조 |
 | `connect ECONNREFUSED` / `querySrv ENOTFOUND` | 문자열 오타, 클러스터 주소 잘못 |
 | `bad auth : authentication failed` | 비밀번호 틀림, **또는 퍼센트 인코딩 누락** |
 | `Server selection timed out` | Network Access 에 내 IP 가 없음 |
 | `mongodb 드라이버가 없습니다` | `npm install` 을 안 했음 |
+
+`.env` 가 이렇게 되기 쉽다. `MONGODB_URI=` 가 이미 있는 줄 뒤에 `MONGODB_URI=...`
+통째를 붙여넣으면 **값이 키로 시작한다.**
+
+```
+MONGODB_URI=MONGODB_URI=mongodb+srv://...    ← 값이 "MONGODB_URI=mongodb+..." 가 된다
+```
+
+형식만 확인하고 싶으면(비밀번호는 찍지 않는다):
+
+```bash
+node -e "const l=require('fs').readFileSync('.env','utf8').split(/\r?\n/).find(x=>x.startsWith('MONGODB_URI='));const v=l.slice(12);console.log('스킴',v.startsWith('mongodb+srv://')||v.startsWith('mongodb://'),'| 길이',v.length)"
+```
+
+저장소만 따로 두들겨 보는 것도 된다.
+
+```bash
+node --env-file=.env -e "const {openStore}=await import('./src/store.mjs');const s=await openStore();console.log(s.kind,s.where);const p='0'.repeat(24);await s.put(p,{probe:1});console.log('쓰기/읽기',(await s.get(p)).probe===1?'OK':'실패');await s.del(p);await s.close()"
+```
 
 #### 6.2.6 환경변수 정리
 
@@ -676,13 +696,20 @@ Preview 환경에만 다른 `MONGODB_DB` 를 지정한다.
 
 #### 6.3.5 검증 범위
 
-정직하게 적어 둔다. **파일 저장소 경로와 MongoDB 연결 실패 경로는 실제로
-돌려 확인했지만, 살아 있는 Atlas 클러스터 연결과 Vercel 배포는 연결 문자열이
-없어 확인하지 못했다.** 저장소를 어댑터로 나눈 것도 그래서다 — 전 기능을
-파일 백엔드로 검증했고, Mongo 는 같은 인터페이스만 채운다.
+정직하게 적어 둔다.
 
-그래서 **6.2.5(로컬 Mongo 검증)를 반드시 먼저 하라**고 적었다. 거기까지
-통과하면 남은 변수는 Vercel 라우팅 하나뿐이고, 그건 6.3.3 의 첫 줄로 판별된다.
+| 경로 | 상태 |
+|---|---|
+| 파일 저장소 (`data/`) | 실측 확인 — e2e 21항목 |
+| **MongoDB Atlas M0 실연결** | **실측 확인** — 쓰기·읽기·삭제 + e2e 21항목 (`store=mongo`) |
+| MongoDB 연결 실패 처리 | 실측 확인 |
+| **Vercel 배포** | **미확인** — 계정이 없어 배포를 돌려 보지 못했다 |
+
+Atlas 쪽은 실제 클러스터(M0 · AWS Seoul)에 붙여 전 기능을 통과시켰다.
+남은 변수는 **Vercel 라우팅과 환경변수 주입** 둘뿐이고, 그건 6.3.3 의 첫 줄
+(`curl .../api/state`)로 바로 판별된다.
+
+그래서 **6.2.5(로컬 Mongo 검증)를 반드시 먼저 하라**고 적었다.
 
 ---
 
