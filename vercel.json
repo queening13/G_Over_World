@@ -1,27 +1,37 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "outputDirectory": "docs",
-  "buildCommand": null,
-  "installCommand": null,
+  "buildCommand": "node build.mjs",
+  "installCommand": "npm install --omit=dev",
   "cleanUrls": true,
   "trailingSlash": false,
+  "functions": {
+    "api/index.mjs": {
+      "includeFiles": "src/roster.json",
+      "memory": 1024,
+      "maxDuration": 15
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.mjs" }
+  ],
   "headers": [
     {
       "source": "/(img|th)/(.*)",
       "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/app.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]
     },
     {
       "source": "/index.html",
       "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
       ]
     }
   ]

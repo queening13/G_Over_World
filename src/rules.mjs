@@ -1,13 +1,43 @@
-
 /* =========================================================================
-   G-Over World — 2d6 대항판정 MS 파일럿 육성 시뮬레이션
+   G-Over World — 게임 규칙 (서버·클라이언트 공용)
+
+   DOM 도 localStorage 도 참조하지 않는다. 브라우저에서는 build.mjs 가
+   맨 끝 export 블록만 떼고 그대로 인라인하고, 서버에서는 import 해서 쓴다.
+
+   ── 상태 규약 ────────────────────────────────────────────────
+   세이브 `g` 는 모듈 지역 변수 하나로 들고 있고 setState() 로 갈아 끼운다.
+   여러 플레이어가 붙는 서버에서 이것이 안전한 이유는 **모든 진입점이
+   완전히 동기(synchronous)** 이기 때문이다. Node 는 동기 실행 중간에
+   다른 요청으로 넘어가지 않으므로 상태가 섞이지 않는다.
+
+   >>> 이 파일 안에서는 절대 await 를 쓰지 말 것. <<<
+   전투 연출 대기는 이벤트({t:'w'})로 내보내고 클라이언트가 기다린다.
    기체 제원 : GGen Eternal Database
    ========================================================================= */
-const UMAP = {}; UNITS.forEach(u => UMAP[u.id] = u);
-/* 작품(시리즈) 목록 — 암시장·도감 필터에 쓴다 */
-const SERIES_LIST = [...new Set(UNITS.map(u => u.sr).filter(Boolean))].sort();
+
+/* 로스터는 실행 시점에 주입한다 — 서버는 roster.json 을, 브라우저는 인라인된
+   UNITS 를 넘긴다. */
+let UNITS = [];
+let UMAP = {};
+let SERIES_LIST = [];
+let POW_SORTED = [];
+
+function initRules(units) {
+  UNITS = units;
+  UMAP = {}; UNITS.forEach(u => UMAP[u.id] = u);
+  SERIES_LIST = [...new Set(UNITS.map(u => u.sr).filter(Boolean))].sort();
+  POW_SORTED = UNITS.map(uPow).sort((a, b) => a - b);
+  return UNITS.length;
+}
+
+/* 현재 처리 중인 세이브. setState() 로만 바꾼다. */
+let g = null;
+const setState = s => { g = s; return g; };
+const getState = () => g;
+
 /* 등급은 화면에 전혀 나오지 않는다. 적 편성 풀을 나누는 내부 키로만 남는다. */
 const RIDX = { N: 0, R: 1, SR: 2, SSR: 3, UR: 4 };
+
 
 const d6 = () => 1 + Math.floor(Math.random() * 6);
 const r2 = () => { const a = d6(), b = d6(); return { a: a, b: b, t: a + b }; };
@@ -280,20 +310,16 @@ const EVENTS = [
 /* =========================================================================
    상태 / 세이브
    ========================================================================= */
-const SAVEKEY = 'gover.world.v5';
+
+/* =========================================================================
+   상태 / 파생
+   ========================================================================= */
 const AP_BASE = 10;              /* 일일 행동력 기본값 */
 const START_CASH = 80000;
 const REPAIR_RATE = 0.16;
-let g = null;
-const S = {
-  view: 'main', busy: false, skip: false, msg: null, res: null,
-  tac: 'norm', ter: 'sp',
-  bookSr: '', bookSel: '', bookQ: '', bookPg: 0,
-  shopSr: '', shopQ: '', shopOK: false, shopPg: 0
-};
-const $ = id => document.getElementById(id);
 const cur = () => g.garage[g.cur];
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
 
 /* ---- 가격 체계 — 등급이 아니라 제원 총합으로 정한다 (#18) ---- */
 const uPow = B => Math.round(B.hp * 0.55 + (B.atk * 3 + B.def * 2.2 + B.mob * 2.2 + (B.sct || 0) * 1.6) * 22 + B.en * 140);
@@ -307,8 +333,8 @@ const ORDER_MARKUP = 1.15;
 const orderPrice = B => Math.round(buyPrice(B) * ORDER_MARKUP / 100) * 100;
 const orderDays = B => clamp(Math.round(uPow(B) / 26000), 3, 20);
 /* 발주는 계급으로 막는다. 고정 구간으로 자르면 계급별 기체 수가 크게 쏠리므로
-   (실측 대령 1기 · 중위 305기) 로스터 전체의 성능 백분위로 8등분한다. */
-const POW_SORTED = UNITS.map(uPow).sort((a, b) => a - b);
+   (실측 대령 1기 · 중위 305기) 로스터 전체의 성능 백분위로 8등분한다.
+   POW_SORTED 는 initRules() 가 채운다. */
 function powPct(B) {
   const v = uPow(B);
   let lo = 0, hi = POW_SORTED.length;
@@ -337,41 +363,64 @@ function newGame(nm, st, unitId) {
     kills: 0, sorties: 0, wins: 0, losses: 0, downs: 0, fame: 0,
     garage: [mkOwned(unitId)], cur: 0, records: [], flags: { bossDown: false }
   };
-  save();
+  return g;                 /* 저장은 서버(store)가 한다 */
 }
-function save() {
-  try { localStorage.setItem(SAVEKEY, JSON.stringify(g)); stamp('저장됨 ' + new Date().toLocaleTimeString('ko-KR')); }
-  catch (e) { stamp('저장 실패'); }
-}
-function load() {
-  try {
-    const o = JSON.parse(localStorage.getItem(SAVEKEY) || 'null');
-    if (!o || !o.garage || !o.garage.length || !UMAP[o.garage[0].id]) return false;
-    g = o; if (!g.flags) g.flags = { bossDown: false };
-    /* 누락 필드 보정 — 세이브 버전을 올려도 구조가 조금씩 자란다 */
-    if (!g.sk || Array.isArray(g.sk)) g.sk = {};
-    if (!Array.isArray(g.eq)) g.eq = [];
-    g.eq = g.eq.filter(k => PSKMAP[k]).slice(0, PSK_SLOT);
-    if (!g.parts) { g.parts = {}; TER_ORDER.forEach(k => g.parts[k] = 0); }
-    TER_ORDER.forEach(k => g.parts[k] = g.parts[k] | 0);
-    if (!Array.isArray(g.orders)) g.orders = [];
-    g.orders = g.orders.filter(o => o && UMAP[o.id]);
-    g.pt = g.pt | 0;
-    g.garage = g.garage.filter(v => UMAP[v.id]);
-    g.garage.forEach(v => {
-      if (!v.pt) v.pt = [];
-      if (!v.mod.sct) v.mod.sct = 0;
-      v.ulv = clamp(v.ulv | 0, 1, ULV_MAX) || 1;
-      v.uexp = v.uexp | 0; v.upt = v.upt | 0;
-      if (!v.inv) { v.inv = {}; UIK.forEach(k => v.inv[k] = 0); }
-      UIK.forEach(k => v.inv[k] = v.inv[k] | 0);
-    });
-    g.cur = clamp(g.cur | 0, 0, g.garage.length - 1);
-    return true;
-  } catch (e) { return false; }
-}
-function stamp(t) { const e = $('saveInfo'); if (e) e.textContent = t; }
 
+/* =========================================================================
+   세이브 마이그레이션
+
+   저장소에서 꺼낸 세이브를 항상 이 함수에 통과시킨다. 스키마가 자라도
+   옛 기록이 깨지지 않게 누락 필드를 채우고, 로스터에서 사라진 기체를 걸러낸다.
+   되돌려주는 것은 같은 객체다(제자리 수정).
+   ========================================================================= */
+function migrate(o) {
+  if (!o || !o.garage || !o.garage.length) return null;
+  o.garage = o.garage.filter(v => v && UMAP[v.id]);
+  if (!o.garage.length) return null;               /* 남은 기체가 없으면 무효 */
+
+  if (!o.flags) o.flags = { bossDown: false };
+  if (!o.sk || Array.isArray(o.sk)) o.sk = {};     /* v4 초기엔 배열이었다 */
+  if (!Array.isArray(o.eq)) o.eq = [];
+  o.eq = o.eq.filter(k => PSKMAP[k]).slice(0, PSK_SLOT);
+  Object.keys(o.sk).forEach(k => {
+    if (!PSKMAP[k]) delete o.sk[k];
+    else o.sk[k] = clamp(o.sk[k] | 0, 0, PSK_MAXLV);
+  });
+  if (!o.parts) o.parts = {};
+  TER_ORDER.forEach(k => o.parts[k] = Math.max(0, o.parts[k] | 0));
+  if (!Array.isArray(o.orders)) o.orders = [];
+  o.orders = o.orders.filter(x => x && UMAP[x.id]);
+  if (!Array.isArray(o.records)) o.records = [];
+
+  o.pt = Math.max(0, o.pt | 0);
+  o.lv = clamp(o.lv | 0, 1, LV_MAX) || 1;
+  o.day = Math.max(1, o.day | 0);
+  o.apMax = Math.max(1, o.apMax | 0) || AP_BASE;
+  o.ap = clamp(o.ap | 0, 0, o.apMax);
+  o.cash = Math.max(0, o.cash | 0);
+  if (!o.st) o.st = {};
+  STK.forEach(k => o.st[k] = clamp(o.st[k] | 0, 0, STAT_MAX));
+
+  o.garage.forEach(v => {
+    if (!Array.isArray(v.pt)) v.pt = [];
+    v.pt = v.pt.filter(k => TER_ORDER.indexOf(k) >= 0).slice(0, PART_SLOT);
+    if (!v.mod) v.mod = {};
+    Object.keys(MOD).forEach(k => v.mod[k] = clamp(v.mod[k] | 0, 0, MODMAX));
+    if (!v.inv) v.inv = {};
+    UIK.forEach(k => v.inv[k] = Math.max(0, v.inv[k] | 0));
+    v.ulv = clamp(v.ulv | 0, 1, ULV_MAX) || 1;
+    v.uexp = Math.max(0, v.uexp | 0);
+    v.upt = Math.max(0, v.upt | 0);
+    const B = UMAP[v.id];
+    if (!Array.isArray(v.wl) || v.wl.length !== B.w.length) v.wl = B.w.map(() => 1);
+    v.wl = v.wl.map((x, i) => clamp(x | 0, 1, B.w[i].pw.length));
+    /* hpMax 계산에 g 가 필요 없으므로 여기서 바로 잘라도 안전하다 */
+    const mx = Math.min(UCAP.hp, Math.round(uBase(v, 'hp') * (1 + v.mod.hp * 0.05)));
+    v.hp = clamp(v.hp | 0, 1, mx);
+  });
+  o.cur = clamp(o.cur | 0, 0, o.garage.length - 1);
+  return o;
+}
 /* =========================================================================
    파생 수치
    ========================================================================= */
@@ -466,6 +515,9 @@ function effStats(B) {
   if (e.awkZero) st.awk = 0;      /* 올드타입 */
   return { st: st, e: e, pen: pen };
 }
+
+/* 올드타입을 장착하면 각성은 0 고정 — 훈련도 포인트 배분도 막힌다 (#15) */
+const awkLocked = () => (g.eq || []).indexOf('ot') >= 0;
 
 function mkPlayer(tac, ter) {
   const v = cur(), s = uStat(v), B = s.B, T = TACTIC[tac];
@@ -628,73 +680,26 @@ const spotBon = u => Math.floor(u.sct / 60);
 const hideBon = u => Math.floor(u.mob / 130);
 
 /* =========================================================================
-   전투 진행
+   전투 — 서버에서 끝까지 계산하고, 연출은 '이벤트 목록'으로 내보낸다.
+
+   구식 CGI 라면 여기서 HTML 한 장을 통째로 그려 보냈겠지만, 그러면
+   라운드별 연출이 사라진다. 판정은 전부 서버가 하되 화면 갱신 순서를
+   그대로 기록해서 클라이언트가 같은 속도로 재생하게 한다.
+
+   이벤트 종류
+     { t:'l', h, c }              로그 한 줄 (h=HTML, c=클래스)
+     { t:'b', a, d, u }           상황판 — a=행동 유닛(없으면 -1), d=거리,
+                                  u=[{h,e,x}] 유닛별 hp·en·은신
+     { t:'d', a, x, w, m, k, n }  교전 표시 — 공격/피격 인덱스, 무장명,
+                                  피해, kind, 대사
+     { t:'w', ms }                연출 대기
+
+   유닛 인덱스 : 0 = 아군, 1.. = 적기 (편성 순서)
    ========================================================================= */
-/* 로그와 상황판은 S 에 보관한다. 전투 종료 후 결과 화면을 다시 그릴 때
-   방금 본 전투 기록이 지워지지 않도록 하기 위함. */
-function bl(html, cls) {
-  const line = '<div class="l ' + (cls || '') + '">' + html + '</div>';
-  (S.blog = S.blog || []).push(line);
-  const el = $('blog'); if (!el) return;
-  el.insertAdjacentHTML('beforeend', line);
-  el.scrollTop = el.scrollHeight;
-}
-const sleep = ms => new Promise(r => setTimeout(r, S.skip ? 0 : ms));
-
-const sameUnit = (a, b) => !!a && !!b && a.side === b.side && (a.idx || 0) === (b.idx || 0) && a.id === b.id;
-
-function buCard(u, actor) {
-  const r = u.hp / u.hpMax, w = r > .5 ? 'hp' : r > .25 ? 'hp w' : 'hp c';
-  const er = u.enMax > 0 ? clamp(u.en / u.enMax, 0, 1) : 0;
-  return '<div class="bu' + (u.hp <= 0 ? ' dead' : '') + (u.hidden ? ' hid' : '') + (sameUnit(u, actor) ? ' act' : '') + '">' +
-    '<img class="ui s" src="' + (u.th || u.img) + '" alt="" decoding="async">' +
-    '<div class="bm"><div class="bn">' + esc(uname(u)) + (u.hidden ? ' <span class="dm">[로스트]</span>' : '') + '</div>' +
-    '<div class="gg bg"><i class="' + w + '" style="width:' + (r * 100) + '%"></i>' +
-    '<span>HP ' + cm(u.hp) + ' / ' + cm(u.hpMax) + '</span></div>' +
-    '<div class="gg bg"><i class="en" style="width:' + (er * 100) + '%"></i>' +
-    '<span>EN ' + cm(u.en) + ' / ' + cm(u.enMax) + '</span></div></div></div>';
-}
-function paintBoard(P, foes, actor, dist, ter) {
-  S.board =
-    '<div class="bcol"><h4>OWN FORCE</h4>' + buCard(P, actor) + '</div>' +
-    '<div class="bcol"><h4>HOSTILE — ' + foes.filter(f => f.hp > 0).length + ' / ' + foes.length + '</h4>' +
-    foes.map(f => buCard(f, actor)).join('') + '</div>';
-  const b = $('bboard'); if (b) b.innerHTML = S.board;
-  if (dist != null) {
-    S.dist = '<span class="dm">전장</span> <b class="cy">' + TERRAIN[ter].n + '</b>' +
-      ' <span class="dm">│ 교전 거리</span> <b class="ye">' + dist + '</b> <span class="dm">/ ' + DIST_MAX + '</span>' +
-      '<div class="dbar"><i style="left:' + ((dist - 1) / (DIST_MAX - 1) * 100) + '%"></i></div>';
-    const d = $('dist'); if (d) d.innerHTML = S.dist;
-  }
-}
-
-/* 교전 표시부 — 공격기와 피격기의 초상화를 나란히 띄운다.
-   kind : 'aim' 조준 / 'miss' 회피 / 'hit' 명중 / 'crit' 크리티컬 / 'fore' 미래 예측 */
-function paintDuel(A, D, w, dmg, kind, note) {
-  const mid =
-    kind === 'aim' ? '<div class="arrow">▶▶▶</div><div class="lbl dm">교전</div>' :
-    kind === 'miss' ? '<div class="lbl dm">MISS</div><div class="num dm">회피</div>' :
-    '<div class="lbl ' + (kind === 'crit' ? 'og' : 'ye') + '">' + (kind === 'crit' ? 'CRITICAL' : 'HIT') + '</div>' +
-    '<div class="num ' + (kind === 'crit' ? 'og' : 'ye') + '">' + cm(dmg) + '</div>';
-  const side = (u, right) =>
-    '<div class="side' + (right ? ' r' : '') + '">' +
-      '<img class="ui xl" src="' + u.img + '" alt="">' +
-      '<div class="info">' +
-        '<div class="dn ' + (u.side === 'p' ? 'cy' : 'mg') + '">' + esc(uname(u)) + '</div>' +
-        '<div class="dm2">' + esc(u.mdl || '') + '</div>' +
-        '<div class="dw ' + (right ? '' : 'ye') + '">' +
-          (right ? 'HP ' + cm(u.hp) + ' / ' + cm(u.hpMax) : esc(w.n)) + '</div>' +
-        '<div class="dw dm">EN ' + cm(u.en) + ' / ' + cm(u.enMax) + '</div>' +
-      '</div></div>';
-  S.duel = side(A, false) + '<div class="mid">' + mid +
-    (note ? '<div class="fore">' + note + '</div>' : '') + '</div>' + side(D, true);
-  const el = $('duel'); if (el) el.innerHTML = S.duel;
-}
-
-async function runBattle(ms, tac, ter) {
-  S.view = 'battle'; S.busy = true; S.skip = false; S.res = null;
-  S.blog = []; S.board = ''; S.duel = ''; S.dist = '';
-  renderAll();
+function resolveBattle(ms, tac, ter) {
+  const ev = [];
+  const L = (h, c) => ev.push({ t: 'l', h: h, c: c || '' });
+  const W = n => ev.push({ t: 'w', ms: n });
 
   const P = mkPlayer(tac, ter);
   const foes = buildFoes(ms, ter, P.foeReaDown);
@@ -711,32 +716,40 @@ async function runBattle(ms, tac, ter) {
   const seen = {};
   foes.forEach(f => { f.idx = nameCount[f.nm] > 1 ? (seen[f.nm] = (seen[f.nm] || 0) + 1) - 1 : 0; });
 
-  let dist = rint(DIST_MIN, DIST_MAX);
-  paintBoard(P, foes, null, dist, ter);
+  /* 인덱스 부여 — 이벤트는 이 번호로만 유닛을 가리킨다 */
+  const all = [P].concat(foes);
+  all.forEach((u, i) => u.ix = i);
+  const snap = () => all.map(u => ({ h: u.hp, e: u.en, x: u.hidden ? 1 : 0 }));
+  const B = (actor, dist) => ev.push({ t: 'b', a: actor ? actor.ix : -1, d: dist, u: snap() });
+  const D_ = (A, D, w, dmg, kind, note) =>
+    ev.push({ t: 'd', a: A.ix, x: D.ix, w: w.n, m: dmg, k: kind, n: note || '' });
 
-  bl('━━ <b>' + ms.n + '</b> ━━ <span class="dm">전장 ' + TERRAIN[ter].n + '</span>', 'sys');
-  bl('전법 ' + TACTIC[tac].n + ' / 탑승기 ' + P.nm + ' <span class="dm">(' + P.mdl + ')</span>' +
+  let dist = rint(DIST_MIN, DIST_MAX);
+  B(null, dist);
+
+  L('━━ <b>' + ms.n + '</b> ━━ <span class="dm">전장 ' + TERRAIN[ter].n + '</span>', 'sys');
+  L('전법 ' + TACTIC[tac].n + ' / 탑승기 ' + P.nm + ' <span class="dm">(' + P.mdl + ')</span>' +
     ' <span class="' + (P.adapt >= 2 ? 'li' : 'ye') + '">지형 적성 ' + ADAPT_MARK[P.adapt] + (P.adapt < 2 ? ' — 공격·기동 85%' : '') + '</span>', 'sys');
-  if ((g.eq || []).length) bl('장착 스킬 ' + g.eq.map(k => PSKMAP[k].n +
+  if ((g.eq || []).length) L('장착 스킬 ' + g.eq.map(k => PSKMAP[k].n +
     (PSKMAP[k].nolv ? '' : ' Lv' + pskLv(k))).join(' · '), 'sys');
-  if (P.opening > 0) bl('<b class="pk">오퍼레이션 메테오</b> — 개시 ' + OPEN_TURN +
+  if (P.opening > 0) L('<b class="pk">오퍼레이션 메테오</b> — 개시 ' + OPEN_TURN +
     '턴간 기체 공격·방어·기동 +' + Math.round(P.opening * 100) + '%', 'fore');
-  bl('적 편성 ' + foes.map(f => uname(f)).join(' , '), 'sys');
-  bl('조우 거리 <b class="ye">' + dist + '</b> — ' + (armed(P, dist) ? '사거리 내' : '<span class="rd">사거리 밖</span>'), 'sys');
+  L('적 편성 ' + foes.map(f => uname(f)).join(' , '), 'sys');
+  L('조우 거리 <b class="ye">' + dist + '</b> — ' + (armed(P, dist) ? '사거리 내' : '<span class="rd">사거리 밖</span>'), 'sys');
 
   /* 선제 발견 — 이긴 쪽이 선공권을 잡는다 (#12) */
   const lead = foes.slice().sort((a, b) => spotBon(b) - spotBon(a))[0] || foes[0];
   const pr = r2().t + spotBon(P), er = r2().t + spotBon(lead);
   let pFirst = pr >= er;
-  bl('색적 판정 — 아군 ' + pr + ' vs 적 ' + er + ' → <b class="' + (pFirst ? 'cy' : 'mg') + '">' +
+  L('색적 판정 — 아군 ' + pr + ' vs 적 ' + er + ' → <b class="' + (pFirst ? 'cy' : 'mg') + '">' +
     (pFirst ? '아군이 먼저 포착. 선공권 획득' : '적이 먼저 포착. 선공권을 내주었다') + '</b>', 'sys');
-  await sleep(420);
+  W(420);
 
   let round = 1, result = 'draw';
   while (round <= ROUND_CAP) {
     if (P.hp <= 0 || foes.every(f => f.hp <= 0)) break;
     const live = () => foes.filter(f => f.hp > 0);
-    bl('── ROUND ' + round + ' ──', 'rnd');
+    L('── ROUND ' + round + ' ──', 'rnd');
 
     /* 1) EN 자동 회복 (#23) · 지속 효과 감쇠 */
     [P].concat(live()).forEach(u => {
@@ -745,7 +758,7 @@ async function runBattle(ms, tac, ter) {
     });
     if (P.opening > 0 && round === OPEN_TURN + 1) {
       P.atk = P.atk0; P.def = P.def0; P.mob = P.mob0;
-      bl('오퍼레이션 메테오 효과가 끝났다.', 'sys');
+      L('오퍼레이션 메테오 효과가 끝났다.', 'sys');
     }
 
     /* 1-b) SEED (#15) — 매 턴 판정, 발동하면 전투 종료까지 각성·반응 +20% */
@@ -753,7 +766,7 @@ async function runBattle(ms, tac, ter) {
       P.seedOn = true;
       P.st.awk = clamp(Math.round(P.st.awk * (1 + SEED_BONUS)), 0, STAT_MAX);
       P.st.rea = clamp(Math.round(P.st.rea * (1 + SEED_BONUS)), 0, STAT_MAX);
-      bl('<b class="pk">〔SEED〕</b> — 세계가 느려진다. 각성·반응 +' +
+      L('<b class="pk">〔SEED〕</b> — 세계가 느려진다. 각성·반응 +' +
         Math.round(SEED_BONUS * 100) + '% <span class="dm">(전투 종료까지)</span>', 'fore');
     }
 
@@ -762,7 +775,7 @@ async function runBattle(ms, tac, ter) {
       if (u.guts > 0 || u.hp / u.hpMax > GUTS_HP) return;
       if (Math.random() >= gutsP(u.st.spi | 0)) return;
       u.guts = GUTS_TURN;
-      bl('<b class="og">〔저력〕</b> — ' + esc(uname(u)) + ' 이(가) 버텨낸다. ' +
+      L('<b class="og">〔저력〕</b> — ' + esc(uname(u)) + ' 이(가) 버텨낸다. ' +
         GUTS_TURN + '턴간 명중률·회피율·방어력 +' + Math.round((GUTS_MUL - 1) * 100) + '%',
         u.side === 'p' ? 'fore' : 'sys');
     });
@@ -791,31 +804,31 @@ async function runBattle(ms, tac, ter) {
       }
       const nd = clamp(dist + step, DIST_MIN, DIST_MAX);
       if (nd !== dist) {
-        bl('거리 조정 — ' + who + '이(가) 주도. ' + dist + ' → <b class="ye">' + nd + '</b>', 'dst');
+        L('거리 조정 — ' + who + '이(가) 주도. ' + dist + ' → <b class="ye">' + nd + '</b>', 'dst');
         dist = nd;
       }
     }
-    if (P.desperate) bl('사거리 밖 — 아군기가 <b class="rd">수비를 버리고</b> 거리를 좁힌다. (회피 −2 / 받는 피해 +12%)', 'dst');
+    if (P.desperate) L('사거리 밖 — 아군기가 <b class="rd">수비를 버리고</b> 거리를 좁힌다. (회피 −2 / 받는 피해 +12%)', 'dst');
 
     /* 3) 색적 — 시야에서 사라지거나, 다시 잡아낸다 (#11) */
     live().forEach(f => {
       if (f.hidden) {
         const a = r2().t + spotBon(P), b = r2().t + hideBon(f);
-        if (a >= b) { f.hidden = false; bl('<span class="cy">재포착</span> — ' + esc(uname(f)) + '을(를) 다시 잡았다.', 'sct'); }
+        if (a >= b) { f.hidden = false; L('<span class="cy">재포착</span> — ' + esc(uname(f)) + '을(를) 다시 잡았다.', 'sct'); }
       } else if (!f.exposed && Math.random() < clamp(0.08 + (hideBon(f) - spotBon(P)) * 0.03, 0.02, 0.38)) {
-        f.hidden = true; bl('<span class="dm">로스트</span> — ' + esc(uname(f)) + '이(가) 사각으로 빠졌다.', 'sct');
+        f.hidden = true; L('<span class="dm">로스트</span> — ' + esc(uname(f)) + '이(가) 사각으로 빠졌다.', 'sct');
       }
       f.exposed = false;
     });
     if (P.hidden) {
       const sk = live().slice().sort((a, b) => spotBon(b) - spotBon(a))[0];
-      if (sk) { const a = r2().t + spotBon(sk), b = r2().t + hideBon(P); if (a >= b) { P.hidden = false; bl('<span class="mg">적에게 재포착되었다.</span>', 'sct'); } }
+      if (sk) { const a = r2().t + spotBon(sk), b = r2().t + hideBon(P); if (a >= b) { P.hidden = false; L('<span class="mg">적에게 재포착되었다.</span>', 'sct'); } }
     } else if (!P.exposed && live().length && Math.random() < clamp(0.08 + (hideBon(P) - spotBon(live().slice().sort((a, b) => spotBon(b) - spotBon(a))[0])) * 0.03, 0.02, 0.38)) {
-      P.hidden = true; bl('<span class="li">아군기가 적의 사각으로 빠져나갔다.</span>', 'sct');
+      P.hidden = true; L('<span class="li">아군기가 적의 사각으로 빠져나갔다.</span>', 'sct');
     }
     P.exposed = false;
-    paintBoard(P, foes, null, dist, ter);
-    await sleep(220);
+    B(null, dist);
+    W(220);
 
     /* 4) 행동 순서 — 1라운드는 선제 발견한 쪽이 먼저 */
     let order = [P].concat(live())
@@ -833,17 +846,17 @@ async function runBattle(ms, tac, ter) {
       /* 숨은 상대는 때릴 수 없다 */
       const cand = (A.side === 'p' ? live().filter(f => !f.hidden) : (P.hidden ? [] : [P]));
       if (!cand.length) {
-        bl(esc(uname(A)) + ' — 표적을 잡지 못했다. <span class="dm">색적에 전념.</span>', 'mis');
-        await sleep(140); continue;
+        L(esc(uname(A)) + ' — 표적을 잡지 못했다. <span class="dm">색적에 전념.</span>', 'mis');
+        W(140); continue;
       }
       const D = A.side === 'p'
         ? cand.slice().sort((x, y) => (x.hp / x.hpMax) - (y.hp / y.hpMax) + (Math.random() - .5) * .45)[0]
         : P;
       const w = chooseWep(A, D, dist);
       if (!w) {
-        bl(esc(uname(A)) + ' — 거리 ' + dist + '에서 <span class="dm">쓸 수 있는 무장이 없다.</span>' +
+        L(esc(uname(A)) + ' — 거리 ' + dist + '에서 <span class="dm">쓸 수 있는 무장이 없다.</span>' +
           (A.en <= 0 ? ' <span class="rd">EN 고갈</span>' : ''), 'mis');
-        await sleep(140); continue;
+        W(140); continue;
       }
       if (w.en) A.en = Math.max(0, A.en - w.en);
       if (w.am) w.ammo--;
@@ -851,9 +864,9 @@ async function runBattle(ms, tac, ter) {
       const reap = A.hidden && (A.reaper || 0) > 0 && Math.random() < A.reaper;
       A.hidden = false; A.exposed = true;      /* 쏘면 위치가 드러난다 */
 
-      paintBoard(P, foes, A, dist, ter);
-      paintDuel(A, D, w, 0, 'aim');
-      await sleep(240);
+      B(A, dist);
+      D_(A, D, w, 0, 'aim');
+      W(240);
 
       /* 미래 예측 — 공격 측 "거기냣!" 절대 명중 / 방어 측 "보인다!" 절대 회피 */
       const foreA = foresee(A), foreD = !foreA && foresee(D);
@@ -868,36 +881,36 @@ async function runBattle(ms, tac, ter) {
         (wIsAwk(w) ? ' <span class="pk">〔각성〕</span>' : '') +
         ' <span class="dm">[' + ra.a + '+' + ra.b + (adv >= 0 ? '+' : '') + adv + '=' + (ra.t + adv) + ' vs ' + rd.a + '+' + rd.b + '=' + rd.t + ']</span>';
 
-      if (reap) bl('<b class="pk">〔사신〕</b> — ' + esc(uname(A)) + ' 사각에서의 일격. <b>크리티컬 확정</b>', 'fore');
-      if (foreA) bl('<b class="pk">「거기냣!」</b> — ' + esc(uname(A)) + ' 미래 예측 발동. <b>절대 명중</b>', 'fore');
-      if (foreD) bl('<b class="pk">「보인다!」</b> — ' + esc(uname(D)) + ' 미래 예측 발동. <b>절대 회피</b>', 'fore');
+      if (reap) L('<b class="pk">〔사신〕</b> — ' + esc(uname(A)) + ' 사각에서의 일격. <b>크리티컬 확정</b>', 'fore');
+      if (foreA) L('<b class="pk">「거기냣!」</b> — ' + esc(uname(A)) + ' 미래 예측 발동. <b>절대 명중</b>', 'fore');
+      if (foreD) L('<b class="pk">「보인다!」</b> — ' + esc(uname(D)) + ' 미래 예측 발동. <b>절대 회피</b>', 'fore');
 
       if (!hit) {
-        bl(head + ' → <span class="dm">' + esc(uname(D)) + ' 회피!</span>', 'mis');
+        L(head + ' → <span class="dm">' + esc(uname(D)) + ' 회피!</span>', 'mis');
         D.mor = clamp(D.mor + 1, 50, 150);
-        paintDuel(A, D, w, 0, 'miss', foreD ? '보인다!' : '');
-        await sleep(250); continue;
+        D_(A, D, w, 0, 'miss', foreD ? '보인다!' : '');
+        W(250); continue;
       }
       const dmg = Math.round(calcDmg(A, D, w) * (crit ? 1.45 : 1));
       D.hp = Math.max(0, D.hp - dmg);
       A.mor = clamp(A.mor + 1 + Math.floor(A.st.spi / 100), 50, 150);
       D.mor = clamp(D.mor + 2, 50, 150);
-      bl(head + ' → ' + (crit ? '<b>CRITICAL!</b> ' : '') + esc(uname(D)) + '에게 <b>' + cm(dmg) +
+      L(head + ' → ' + (crit ? '<b>CRITICAL!</b> ' : '') + esc(uname(D)) + '에게 <b>' + cm(dmg) +
         '</b> 데미지 <span class="dm">(잔여 ' + cm(D.hp) + ' / EN ' + cm(A.en) + ')</span>', crit ? 'crt' : 'hit');
-      paintDuel(A, D, w, dmg, crit ? 'crit' : 'hit', foreA ? '거기냣!' : '');
-      paintBoard(P, foes, A, dist, ter);
-      await sleep(crit ? 380 : 280);
+      D_(A, D, w, dmg, crit ? 'crit' : 'hit', foreA ? '거기냣!' : '');
+      B(A, dist);
+      W(crit ? 380 : 280);
 
       if (D.hp <= 0) {
-        bl('▶ ' + esc(uname(D)) + ' <b>격추!</b>', 'dwn');
+        L('▶ ' + esc(uname(D)) + ' <b>격추!</b>', 'dwn');
         A.mor = clamp(A.mor + 3, 50, 150);
         if (D.side === 'e') foes.filter(f => f.hp > 0).forEach(f => f.mor = clamp(f.mor + 5, 50, 150));
-        paintBoard(P, foes, A, dist, ter);
-        await sleep(360);
+        B(A, dist);
+        W(360);
       }
     }
     round++;
-    await sleep(130);
+    W(130);
   }
 
   if (P.hp <= 0) result = 'lose';
@@ -908,20 +921,20 @@ async function runBattle(ms, tac, ter) {
   let pay = 0, exp = 0;
   downed.forEach(f => { pay += f.pay; exp += f.exp; });
   g.kills += downed.length; g.sorties++;
-  await sleep(260);
+  W(260);
 
   if (result === 'win') {
     pay += ms.pay; exp += ms.exp; g.wins++; g.fame += 2 + RIDX[ms.pool[ms.pool.length - 1]] * 2;
     if (ms.boss && !g.flags.bossDown) { g.flags.bossDown = true; g.fame += 30; }
-    bl('■ 임무 완수 — 전 목표 격파', 'win');
+    L('■ 임무 완수 — 전 목표 격파', 'win');
   } else if (result === 'lose') {
     g.losses++; g.downs++;
     const pen = Math.round(g.cash * 0.1);
     g.cash = Math.max(0, g.cash - pen); pay = Math.round(pay * 0.4);
-    bl('■ 기체 대파 — 긴급 사출. 수복 부담금 ' + cm(pen) + 'C 청구', 'lose');
+    L('■ 기체 대파 — 긴급 사출. 수복 부담금 ' + cm(pen) + 'C 청구', 'lose');
   } else {
     pay = Math.round(pay * 0.7);
-    bl('■ 교전 시간 초과 — 양측 철수', 'sys');
+    L('■ 교전 시간 초과 — 양측 철수', 'sys');
   }
   g.cash += pay;
   g.lvupNote = [];
@@ -930,17 +943,22 @@ async function runBattle(ms, tac, ter) {
   g.lvupNote = g.lvupNote.concat(gainUnitExp(cur(), exp));
   g.records.unshift({ day: g.day, m: ms.n, t: ter, r: result, kills: downed.length, pay: pay, exp: exp, hp: Math.round(cur().hp / uStat(cur()).hpMax * 100) });
   g.records = g.records.slice(0, 40);
-  save();
 
-  bl('　');
-  bl('획득 자금 <b class="ye">' + cm(pay) + 'C</b> / 경험치 <b class="ye">' + cm(exp) + '</b> / 격추 <b class="ye">' + downed.length + '</b>', 'sys');
-  (g.lvupNote || []).forEach(t => bl('★ ' + t, 'win'));
+  L('　');
+  L('획득 자금 <b class="ye">' + cm(pay) + 'C</b> / 경험치 <b class="ye">' + cm(exp) + '</b> / 격추 <b class="ye">' + downed.length + '</b>', 'sys');
+  (g.lvupNote || []).forEach(t => L('★ ' + t, 'win'));
 
-  S.busy = false;
-  S.res = { r: result, pay: pay, exp: exp, kills: downed.length, n: ms.n, t: ter, lv: (g.lvupNote || []).slice() };
-  renderAll();
+  /* 클라이언트가 재생에 쓸 정적 정보 — 이름·초상화는 여기서 한 번만 보낸다 */
+  const cast = all.map(u => ({
+    side: u.side, id: u.id, nm: u.nm, mdl: u.mdl, img: u.img, th: u.th,
+    idx: u.idx || 0, tag: u.tag || '', hpMax: u.hpMax, enMax: u.enMax
+  }));
+
+  return {
+    ter: ter, cast: cast, ev: ev,
+    res: { r: result, pay: pay, exp: exp, kills: downed.length, n: ms.n, t: ter, lv: (g.lvupNote || []).slice() }
+  };
 }
-
 /* 전장에 적성이 있는 기체만 편성된다 (#15) */
 function buildFoes(ms, ter, charm) {
   const out = [], df = ms.diff || 1;
@@ -988,3 +1006,32 @@ function marketOf(day) {
   }
   return out;
 }
+
+
+/* @@BROWSER_CUT@@ — build.mjs 는 이 줄 아래를 잘라 브라우저 번들을 만든다 */
+export {
+  initRules, setState, getState,
+  UNITS, UMAP, SERIES_LIST,
+  STN, STK, STAT_MAX, LV_MAX, START_PT, LVUP_PT, STAT_DESC,
+  AWK_FORESEE, AWK_FORESEE_P, AWK_RANGE_CAP,
+  TRAIN_TIER, trainTier, TRAIN_AP,
+  PSKILL, PSKMAP, PSK_MAXLV, PSK_SLOT, SEED_BONUS, pskCost, pskLv, pskEquipped,
+  skillEffect, effStats, awkLocked,
+  TER_ORDER, TERRAIN, ADAPT_MARK, terMul, PART_SLOT, PART_PRICE, PARTS,
+  MOD, MODMAX, UCAP, UIK, UIN, UINV_STEP, ULV_MAX, ULVUP_PT, uExpNeed,
+  ROUND_CAP, DMG_K, FOE_HP, FOE_DMG, ATK_STAT_K, DEF_STAT_K,
+  STAT_HIT_K, MOB_EVA_K, HIT_CLAMP, EN_REGEN,
+  SPI_PEN_MAX, SPI_CRIT_K, GUTS_HP, GUTS_TURN, GUTS_MUL, gutsP, penMulOf,
+  DIST_MIN, DIST_MAX, RANGE_MUL, MISSION, TACTIC, EVENTS, RANKS, rankOf,
+  AP_BASE, START_CASH, REPAIR_RATE,
+  cur, esc, clamp, pick, rint, cm, d6, r2, oppP,
+  uPow, buyPrice, lvReqOf, modCost, wlCost,
+  ORDER_MARKUP, orderPrice, orderDays, rankReqOf, rankIdx,
+  mkOwned, newGame, migrate, adaptOf, adaptBase, canSortie,
+  uBase, uStat, uInvMaxed, wpowOf, wpMax, statTotal,
+  gainExp, gainUnitExp, wIsMelee, wIsAwk, wRange, isGundamName,
+  resolveBattle, buildFoes, marketOf,
+  /* 아래는 밸런스 시뮬레이터·회귀 시험에서 직접 부른다 */
+  mkPlayer, mkFoe, uname, awkOf, foresee, usable, armed,
+  hitAdv, calcDmg, critNeed, chooseWep, spotBon, hideBon, mvSpd, wantDir
+};

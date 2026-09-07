@@ -1,6 +1,4 @@
 node_modules/
-package-lock.json
+data/
 src/_units_all.json
-_*.mjs
-_*.js
-_*.json
+.vercel/

@@ -1,5 +1,168 @@
 
 /* =========================================================================
+   G-Over World — 클라이언트
+
+   게임 규칙은 서버(rules.mjs · actions.mjs)가 갖고 있다. 여기서 하는 일은
+   두 가지뿐이다.
+
+     1. 서버가 준 세이브로 화면을 그린다
+     2. 버튼을 누르면 '무엇을 하겠다'만 서버에 보내고, 돌아온 세이브로 다시 그린다
+
+   세이브를 직접 고치는 코드는 이 파일에 없다. 전투도 서버가 끝까지 계산해서
+   연출 이벤트 목록으로 내려주고, 여기서는 그대로 재생만 한다.
+
+   ── 스코프 규약 ────────────────────────────────────────────────
+   build.mjs 가 rules.mjs 와 이 파일을 같은 스코프에 이어 붙이므로,
+   rules.mjs 의 `g` 를 그대로 읽을 수 있다. 대신 여기서 `g` 를 다시 선언하면
+   안 되고, 값을 바꿀 때는 반드시 setState() 를 쓴다.
+   ========================================================================= */
+const $ = id => document.getElementById(id);
+
+/* 화면 상태 — 서버로 가지 않는 것들(현재 탭·검색어·페이지 등) */
+const S = {
+  view: 'main', busy: false, skip: false, msg: null, res: null,
+  tac: 'norm', ter: 'sp',
+  bookSr: '', bookSel: '', bookQ: '', bookPg: 0,
+  shopSr: '', shopQ: '', shopOK: false, shopPg: 0,
+  blog: [], board: '', duel: '', dist: '',
+  pid: null, store: ''
+};
+
+function stamp(t) { const e = $('saveInfo'); if (e) e.textContent = t; }
+
+/* =========================================================================
+   서버 통신
+   ========================================================================= */
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body || {})
+  });
+  const j = await r.json().catch(() => ({ err: '응답을 읽지 못했습니다.' }));
+  if (!r.ok) throw new Error(j.err || ('서버 오류 ' + r.status));
+  return j;
+}
+async function getJSON(url) {
+  const r = await fetch(url, { credentials: 'same-origin' });
+  const j = await r.json().catch(() => ({ err: '응답을 읽지 못했습니다.' }));
+  if (!r.ok) throw new Error(j.err || ('서버 오류 ' + r.status));
+  return j;
+}
+function adopt(j) {
+  if (j.pid) S.pid = j.pid;
+  if (j.store) S.store = j.store;
+  setState(j.g || null);
+}
+
+/* 액션 하나를 서버에 보내고 결과를 반영한다.
+   거절당하면(자금 부족 등) 서버가 이유를 문장으로 돌려준다. */
+async function act(a) {
+  if (S.busy) return;
+  S.busy = true; renderCmd();
+  try {
+    const j = await post('/api/act', { a: a });
+    adopt(j);
+    const out = j.out || {};
+    if (out.msg) S.msg = out.msg;
+    if (out.res) S.res = out.res; else if (!out.battle) S.res = null;
+    stamp('저장됨 ' + new Date().toLocaleTimeString('ko-KR'));
+    if (out.battle) { S.busy = false; await playBattle(out.battle); return; }
+    renderAll();
+  } catch (e) {
+    S.msg = { t: '진행할 수 없습니다', b: esc(e.message) };
+    S.view = S.view === 'battle' ? 'main' : S.view;
+    renderAll();
+  } finally {
+    S.busy = false; renderCmd();
+  }
+}
+
+/* =========================================================================
+   전투 재생 — 서버가 보낸 이벤트를 원래 속도로 되짚는다
+   ========================================================================= */
+const sleep = ms => new Promise(r => setTimeout(r, S.skip ? 0 : ms));
+
+function bl(html, cls) {
+  const line = '<div class="l ' + (cls || '') + '">' + html + '</div>';
+  S.blog.push(line);
+  const el = $('blog'); if (!el) return;
+  el.insertAdjacentHTML('beforeend', line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function buCard(u, actor) {
+  const r = u.hp / u.hpMax, w = r > .5 ? 'hp' : r > .25 ? 'hp w' : 'hp c';
+  const er = u.enMax > 0 ? clamp(u.en / u.enMax, 0, 1) : 0;
+  return '<div class="bu' + (u.hp <= 0 ? ' dead' : '') + (u.hidden ? ' hid' : '') + (u === actor ? ' act' : '') + '">' +
+    '<img class="ui s" src="' + (u.th || u.img) + '" alt="" decoding="async">' +
+    '<div class="bm"><div class="bn">' + esc(uname(u)) + (u.hidden ? ' <span class="dm">[로스트]</span>' : '') + '</div>' +
+    '<div class="gg bg"><i class="' + w + '" style="width:' + (r * 100) + '%"></i>' +
+    '<span>HP ' + cm(u.hp) + ' / ' + cm(u.hpMax) + '</span></div>' +
+    '<div class="gg bg"><i class="en" style="width:' + (er * 100) + '%"></i>' +
+    '<span>EN ' + cm(u.en) + ' / ' + cm(u.enMax) + '</span></div></div></div>';
+}
+function paintBoard(cast, actor, dist, ter) {
+  const P = cast[0], foes = cast.slice(1);
+  S.board =
+    '<div class="bcol"><h4>OWN FORCE</h4>' + buCard(P, actor) + '</div>' +
+    '<div class="bcol"><h4>HOSTILE — ' + foes.filter(f => f.hp > 0).length + ' / ' + foes.length + '</h4>' +
+    foes.map(f => buCard(f, actor)).join('') + '</div>';
+  const b = $('bboard'); if (b) b.innerHTML = S.board;
+  if (dist != null) {
+    S.dist = '<span class="dm">전장</span> <b class="cy">' + TERRAIN[ter].n + '</b>' +
+      ' <span class="dm">│ 교전 거리</span> <b class="ye">' + dist + '</b> <span class="dm">/ ' + DIST_MAX + '</span>' +
+      '<div class="dbar"><i style="left:' + ((dist - 1) / (DIST_MAX - 1) * 100) + '%"></i></div>';
+    const d = $('dist'); if (d) d.innerHTML = S.dist;
+  }
+}
+/* kind : 'aim' 조준 / 'miss' 회피 / 'hit' 명중 / 'crit' 크리티컬 */
+function paintDuel(A, D, wn, dmg, kind, note) {
+  const mid =
+    kind === 'aim' ? '<div class="arrow">▶▶▶</div><div class="lbl dm">교전</div>' :
+    kind === 'miss' ? '<div class="lbl dm">MISS</div><div class="num dm">회피</div>' :
+    '<div class="lbl ' + (kind === 'crit' ? 'og' : 'ye') + '">' + (kind === 'crit' ? 'CRITICAL' : 'HIT') + '</div>' +
+    '<div class="num ' + (kind === 'crit' ? 'og' : 'ye') + '">' + cm(dmg) + '</div>';
+  const side = (u, right) =>
+    '<div class="side' + (right ? ' r' : '') + '">' +
+      '<img class="ui xl" src="' + u.img + '" alt="">' +
+      '<div class="info">' +
+        '<div class="dn ' + (u.side === 'p' ? 'cy' : 'mg') + '">' + esc(uname(u)) + '</div>' +
+        '<div class="dm2">' + esc(u.mdl || '') + '</div>' +
+        '<div class="dw ' + (right ? '' : 'ye') + '">' +
+          (right ? 'HP ' + cm(u.hp) + ' / ' + cm(u.hpMax) : esc(wn)) + '</div>' +
+        '<div class="dw dm">EN ' + cm(u.en) + ' / ' + cm(u.enMax) + '</div>' +
+      '</div></div>';
+  S.duel = side(A, false) + '<div class="mid">' + mid +
+    (note ? '<div class="fore">' + note + '</div>' : '') + '</div>' + side(D, true);
+  const el = $('duel'); if (el) el.innerHTML = S.duel;
+}
+
+async function playBattle(b) {
+  S.view = 'battle'; S.busy = true; S.skip = false; S.res = null;
+  S.blog = []; S.board = ''; S.duel = ''; S.dist = '';
+  renderAll();
+
+  /* 서버가 보낸 출연진에 가변 상태(hp·en·은신)를 붙여 들고 다닌다 */
+  const cast = b.cast.map(u => Object.assign({}, u, { hp: u.hpMax, en: u.enMax, hidden: false }));
+  for (const e of b.ev) {
+    if (e.t === 'l') { bl(e.h, e.c); continue; }
+    if (e.t === 'w') { await sleep(e.ms); continue; }
+    if (e.t === 'b') {
+      e.u.forEach((s, i) => { cast[i].hp = s.h; cast[i].en = s.e; cast[i].hidden = !!s.x; });
+      paintBoard(cast, e.a >= 0 ? cast[e.a] : null, e.d, b.ter);
+      continue;
+    }
+    if (e.t === 'd') paintDuel(cast[e.a], cast[e.x], e.w, e.m, e.k, e.n);
+  }
+
+  S.busy = false;
+  S.res = b.res;
+  renderAll();
+}
+
+/* =========================================================================
    렌더링
    ========================================================================= */
 function gauge(cls, cur, max, label) {
@@ -200,8 +363,11 @@ function renderCmd() {
 /* ---------------- 메인 ---------------- */
 function renderMain() {
   const host = $('mainf');
-  if (!g) { host.innerHTML = viewNew(); bindNew(); return; }
-  const map = { train: viewTrain, sortie: viewSortie, battle: viewBattle, repair: viewRepair, mod: viewMod, shop: viewShop, market: viewMarket, hangar: viewHangar, book: viewBook, log: viewLog };
+  if (!g) {
+    if (S.view === 'code') { host.innerHTML = viewCode(); bindMain(); return; }
+    host.innerHTML = viewNew(); bindNew(); return;
+  }
+  const map = { train: viewTrain, sortie: viewSortie, battle: viewBattle, repair: viewRepair, mod: viewMod, shop: viewShop, market: viewMarket, hangar: viewHangar, book: viewBook, log: viewLog, code: viewCode };
   host.innerHTML = (map[S.view] || viewMain)();
   bindMain();
   const lg = $('blog'); if (lg) lg.scrollTop = lg.scrollHeight;
@@ -254,11 +420,10 @@ function bindNew() {
   document.querySelectorAll('[data-start]').forEach(b => b.onclick = () => { startSel = +b.dataset.start; renderMain(); });
   $('bStart').onclick = () => {
     if (newRemain() !== 0) return;
-    const nm = ($('nName').value || '').trim() || '이름없는 파일럿';
-    newGame(nm, Object.assign({}, newSt), startPool[startSel].id);
-    S.view = 'main';
-    S.msg = { t: '배속 완료', b: esc(nm) + ' — 탑승기 <b class="cy">' + esc(startPool[startSel].nm) + '</b>. 전선 기록을 개시합니다.' };
-    renderAll();
+    act({ k: 'new',
+      name: ($('nName').value || '').trim(),
+      st: Object.assign({}, newSt),
+      unitId: startPool[startSel].id });
   };
 }
 
@@ -295,8 +460,6 @@ function viewMain() {
 }
 
 /* ---------------- 훈련 ---------------- */
-/* 올드타입을 장착하면 각성은 0 고정 — 훈련도 포인트 배분도 막는다 (#15) */
-const awkLocked = () => (g.eq || []).indexOf('ot') >= 0;
 let trAlloc = null;
 const trSpent = () => STK.reduce((a, k) => a + (trAlloc ? trAlloc[k] : 0), 0);
 function resetTrAlloc() { trAlloc = {}; STK.forEach(k => trAlloc[k] = 0); }
@@ -381,21 +544,6 @@ function viewTrain() {
   });
   return h + '</div>';
 }
-function doTrain(k) {
-  if (g.ap <= 0) return;
-  g.ap -= TRAIN_AP;
-  const t = trainTier(g.st[k]);
-  const roll = 1 + Math.floor(Math.random() * 100);
-  const okv = roll <= Math.round(t.p * 100);
-  const up = okv ? Math.min(t.up, STAT_MAX - g.st[k]) : 0;
-  g.st[k] = Math.min(STAT_MAX, g.st[k] + up);
-  const exp = 18 + up * 12;
-  g.lvupNote = []; gainExp(exp);
-  S.res = { kind: 'train', k: k, up: up, roll: roll, p: t.p, exp: exp,
-    title: up ? '성공 — ' + STN[k] + ' +' + up : '성과 없음 — 몸이 따라주지 않는다' };
-  save(); renderAll();
-}
-
 /* ---------------- 출격 ---------------- */
 function viewSortie() {
   const v = cur(), s = uStat(v);
@@ -772,56 +920,64 @@ function viewLog() {
   return h + '</table>';
 }
 
+/* ---------------- 이어하기 코드 ----------------
+   세이브가 서버에 있으므로 쿠키만 있으면 어느 기기에서든 이어진다.
+   쿠키가 없는 기기(다른 PC·폰)에서는 이 코드를 넣어 불러온다. */
+function viewCode() {
+  let h = '<h2 class="sec">【 이어하기 코드 】<em>PLAYER CODE</em></h2>' + msgBox();
+  h += '<p class="lead">진행 상황은 <b>서버</b>에 저장됩니다. 이 브라우저는 쿠키로 자동 인식되지만, ' +
+    '다른 기기에서 이어서 하려면 아래 코드를 그쪽에 입력하십시오.</p>';
+  h += '<table class="tb"><caption>【 내 코드 】</caption>' +
+    '<tr><th>코드</th><td class="ye" style="font-size:14px;letter-spacing:.08em">' + esc(S.pid || '—') + '</td></tr>' +
+    '<tr><th>저장소</th><td>' + (S.store === 'mongo' ? 'MongoDB' : '서버 파일') + '</td></tr></table>';
+  h += '<div class="note">※ 코드를 아는 사람은 이 기록을 그대로 열 수 있습니다. <b>공유에 주의하십시오.</b></div>';
+  h += '<table class="tb"><caption>【 다른 기록 불러오기 】</caption>' +
+    '<tr><th>코드</th><td><input type="text" id="cIn" maxlength="24" placeholder="24자리 코드" style="width:230px"></td></tr></table>';
+  h += '<div class="row-btn"><button class="btn p" id="bCodeGo">【불러오기】</button>' +
+    '<button class="btn" id="bCodeBack">【돌아가기】</button></div>';
+  return h;
+}
+
 /* =========================================================================
-   바인딩
+   바인딩 — 상태를 바꾸는 것은 전부 act() 로 서버에 넘긴다
    ========================================================================= */
 function bindMain() {
   const host = $('mainf');
+
+  /* 이어하기 코드 화면 */
+  const cg = $('bCodeGo'); if (cg) cg.onclick = async () => {
+    const v = ($('cIn').value || '').trim().toLowerCase();
+    try {
+      const j = await post('/api/login', { pid: v });
+      adopt(j);
+      S.view = 'main';
+      S.msg = { t: '기록 복원', b: 'DAY ' + g.day + ' 시점부터 재개합니다.' };
+    } catch (e) { S.msg = { t: '불러오지 못했습니다', b: esc(e.message) }; }
+    renderAll();
+  };
+  const cb = $('bCodeBack'); if (cb) cb.onclick = () => { S.view = 'main'; S.msg = null; renderAll(); };
+
   if (!g) return;
 
-  /* 레벨업 포인트 배분 */
+  /* ---- 파일럿 능력 포인트 배분 ---- */
   bindAlloc('tr',
     () => ({ vals: (() => { const o = {}; STK.forEach(k => o[k] = g.st[k] + trAlloc[k]); return o; })(), remain: g.pt - trSpent(), spent: trAlloc }),
     (k, n) => { trAlloc[k] += n; });
   const ac = $('bAlCancel'); if (ac) ac.onclick = () => { resetTrAlloc(); renderMain(); };
   const ao = $('bAlOK'); if (ao) ao.onclick = () => {
-    const n = trSpent();
-    if (n <= 0 || n > g.pt) return;
-    STK.forEach(k => g.st[k] = Math.min(STAT_MAX, g.st[k] + trAlloc[k]));
-    g.pt -= n; resetTrAlloc();
-    S.msg = { t: '능력 배분 완료', b: n + '포인트를 배분했습니다.' };
-    save(); renderAll();
+    const map = {}; STK.forEach(k => map[k] = trAlloc[k]);
+    resetTrAlloc();
+    act({ k: 'alloc', map: map });
   };
 
-  host.querySelectorAll('[data-tr]').forEach(b => b.onclick = () => doTrain(b.dataset.tr));
-  /* 파일럿 스킬 습득·강화 (#15) */
-  host.querySelectorAll('[data-sklv]').forEach(b => b.onclick = () => {
-    const K = PSKMAP[b.dataset.sklv]; if (!K) return;
-    const lv = pskLv(K.k), max = K.nolv ? 1 : PSK_MAXLV;
-    const c = pskCost(lv);
-    if (lv >= max || c > g.cash) return;
-    g.cash -= c; g.sk[K.k] = lv + 1;
-    S.msg = { t: K.n + (lv ? ' Lv' + (lv + 1) : ' 습득'), b: cm(c) + 'C 지불 — ' + esc(K.d) };
-    save(); renderAll();
-  });
-  host.querySelectorAll('[data-eq]').forEach(b => b.onclick = () => {
-    const K = PSKMAP[b.dataset.eq]; if (!K) return;
-    if (pskLv(K.k) <= 0 || pskEquipped(K.k) || g.eq.length >= PSK_SLOT) return;
-    if (K.g && g.eq.some(x => PSKMAP[x] && PSKMAP[x].g === K.g)) return;
-    g.eq.push(K.k);
-    if (K.k === 'ot') S.msg = { t: '올드타입 장착', b: '각성이 <b class="rd">0으로 고정</b>됩니다. 각성 무장은 사용할 수 없습니다.' };
-    else S.msg = { t: K.n + ' 장착', b: esc(K.d) };
-    save(); renderAll();
-  });
-  host.querySelectorAll('[data-uneq]').forEach(b => b.onclick = () => {
-    const i = g.eq.indexOf(b.dataset.uneq);
-    if (i < 0) return;
-    g.eq.splice(i, 1);
-    S.msg = { t: '장착 해제', b: PSKMAP[b.dataset.uneq].n + ' 을(를) 내렸습니다.' };
-    save(); renderAll();
-  });
+  host.querySelectorAll('[data-tr]').forEach(b => b.onclick = () => act({ k: 'train', stat: b.dataset.tr }));
 
-  /* 기체 강화 포인트 (#1~#3) */
+  /* ---- 파일럿 스킬 ---- */
+  host.querySelectorAll('[data-sklv]').forEach(b => b.onclick = () => act({ k: 'skbuy', sk: b.dataset.sklv }));
+  host.querySelectorAll('[data-eq]').forEach(b => b.onclick = () => act({ k: 'skeq', sk: b.dataset.eq }));
+  host.querySelectorAll('[data-uneq]').forEach(b => b.onclick = () => act({ k: 'skuneq', sk: b.dataset.uneq }));
+
+  /* ---- 기체 강화 포인트 ---- */
   host.querySelectorAll('[data-ua]').forEach(b => b.onclick = () => {
     const k = b.dataset.ua, n = +b.dataset.n, v = cur();
     const room = Math.max(0, Math.ceil((UCAP[k] - uBase(v, k)) / UINV_STEP[k]) - uAlloc[k]);
@@ -831,178 +987,98 @@ function bindMain() {
   });
   const uc = $('bUaCancel'); if (uc) uc.onclick = () => { resetUAlloc(); renderMain(); };
   const uo = $('bUaOK'); if (uo) uo.onclick = () => {
-    const v = cur(), n = uSpent();
-    if (n <= 0 || n > v.upt) return;
-    const before = uStat(v).hpMax;
-    UIK.forEach(k => v.inv[k] = (v.inv[k] | 0) + uAlloc[k]);
-    v.upt -= n; resetUAlloc();
-    v.hp += uStat(v).hpMax - before;             /* HP 를 올렸으면 그만큼 실HP도 늘려 준다 */
-    v.hp = clamp(v.hp, 1, uStat(v).hpMax);
-    S.msg = { t: '기체 강화 완료', b: n + '포인트를 투입했습니다.' };
-    save(); renderAll();
+    const map = {}; UIK.forEach(k => map[k] = uAlloc[k]);
+    resetUAlloc();
+    act({ k: 'ualloc', map: map });
   };
 
-  /* 상점 (#5 · #6) */
+  /* ---- 상점 ---- */
   const sq = $('shopQ');
   if (sq) sq.oninput = () => { S.shopQ = sq.value; S.shopPg = 0; const c = sq.selectionStart; renderMain(); const n2 = $('shopQ'); if (n2) { n2.focus(); n2.setSelectionRange(c, c); } };
   const ss = $('shopSeries'); if (ss) ss.onchange = () => { S.shopSr = ss.value; S.shopPg = 0; S.msg = null; renderMain(); };
   host.querySelectorAll('[data-shopok]').forEach(b => b.onclick = () => { S.shopOK = !S.shopOK; S.shopPg = 0; renderMain(); });
-  host.querySelectorAll('[data-bpart]').forEach(b => b.onclick = () => {
-    const k = b.dataset.bpart;
-    if (PART_PRICE > g.cash) return;
-    g.cash -= PART_PRICE; g.parts[k] = (g.parts[k] | 0) + 1;
-    S.msg = { t: PARTS[k].n + ' 구입', b: cm(PART_PRICE) + 'C 지불 — 창고 보유 ' + g.parts[k] + '개. 【개조】에서 장착하십시오.' };
-    save(); renderAll();
-  });
-  host.querySelectorAll('[data-order]').forEach(b => b.onclick = () => {
-    const B = UMAP[b.dataset.order]; if (!B) return;
-    const price = orderPrice(B), days = orderDays(B);
-    if (rankIdx() < rankReqOf(B) || price > g.cash) return;
-    if (g.garage.some(v => v.id === B.id) || g.orders.some(o => o.id === B.id)) return;
-    g.cash -= price;
-    g.orders.push({ id: B.id, due: g.day + days, price: price });
-    S.msg = { t: '발주 접수', b: esc(B.nm) + ' — ' + cm(price) + 'C 선불. <b class="ye">DAY ' + (g.day + days) + '</b> 인도 예정입니다.' };
-    save(); renderAll();
-  });
+  host.querySelectorAll('[data-bpart]').forEach(b => b.onclick = () => act({ k: 'partbuy', ter: b.dataset.bpart }));
+  host.querySelectorAll('[data-order]').forEach(b => b.onclick = () => act({ k: 'order', id: b.dataset.order }));
   host.querySelectorAll('[data-cancel]').forEach(b => b.onclick = () => {
     const i = +b.dataset.cancel, o = g.orders[i];
     if (!o) return;
-    const back = Math.round(o.price * 0.5);
-    if (!confirm(UMAP[o.id].nm + ' 발주를 취소합니다. ' + cm(back) + 'C 만 환불됩니다.')) return;
-    g.orders.splice(i, 1); g.cash += back;
-    S.msg = { t: '발주 취소', b: cm(back) + 'C 환불되었습니다.' };
-    save(); renderAll();
+    if (!confirm(UMAP[o.id].nm + ' 발주를 취소합니다. ' + cm(Math.round(o.price * 0.5)) + 'C 만 환불됩니다.')) return;
+    act({ k: 'ordercancel', i: i });
   });
 
+  /* ---- 출격 ---- */
   host.querySelectorAll('[data-ter]').forEach(b => b.onclick = () => { S.ter = b.dataset.ter; renderMain(); });
   host.querySelectorAll('[data-tac]').forEach(b => b.onclick = () => { S.tac = b.dataset.tac; renderMain(); });
   host.querySelectorAll('[data-ms]').forEach(b => b.onclick = () => {
-    const m = MISSION.find(v => v.id === b.dataset.ms);
-    if (!m || g.ap < m.ap || g.lv < m.lv || !canSortie(cur(), S.ter)) return;
-    g.ap -= m.ap; S.msg = null; runBattle(m, S.tac, S.ter);
+    S.msg = null;
+    act({ k: 'sortie', m: b.dataset.ms, tac: S.tac, ter: S.ter });
   });
   const sk = $('bSkip'); if (sk) sk.onclick = () => { S.skip = true; sk.disabled = true; sk.textContent = '【생략 중…】'; };
   const bk = $('bBack'); if (bk) bk.onclick = () => { S.view = 'main'; S.res = null; renderAll(); };
   const ag = $('bAgain'); if (ag) ag.onclick = () => { S.view = 'sortie'; S.res = null; renderAll(); };
 
-  const fx = $('bFix'); if (fx) fx.onclick = () => {
-    const c = repairCost();
-    if (c <= 0 || c > g.cash || g.ap <= 0) return;
-    g.cash -= c; g.ap--; cur().hp = uStat(cur()).hpMax;
-    S.msg = { t: '정비 완료', b: cm(c) + 'C를 지불하고 기체를 완전 복구했습니다.' };
-    save(); renderAll();
-  };
+  /* ---- 정비 · 개조 · 파츠 · 무장 ---- */
+  const fx = $('bFix'); if (fx) fx.onclick = () => act({ k: 'repair' });
+  host.querySelectorAll('[data-mod]').forEach(b => b.onclick = () => act({ k: 'mod', mk: b.dataset.mod }));
+  host.querySelectorAll('[data-part]').forEach(b => b.onclick = () => act({ k: 'partfit', ter: b.dataset.part }));
+  host.querySelectorAll('[data-unpart]').forEach(b => b.onclick = () => act({ k: 'partoff', i: +b.dataset.unpart }));
+  host.querySelectorAll('[data-wl]').forEach(b => b.onclick = () => act({ k: 'wl', i: +b.dataset.wl }));
 
-  host.querySelectorAll('[data-mod]').forEach(b => b.onclick = () => {
-    const k = b.dataset.mod, v = cur(), B = UMAP[v.id], c = modCost(B, v.mod[k] | 0);
-    if ((v.mod[k] | 0) >= MODMAX || c > g.cash) return;
-    const before = uStat(v).hpMax;
-    g.cash -= c; v.mod[k] = (v.mod[k] | 0) + 1;
-    if (k === 'hp') v.hp += uStat(v).hpMax - before;
-    v.hp = Math.min(v.hp, uStat(v).hpMax);
-    S.msg = { t: MOD[k].n + ' ' + v.mod[k] + '단', b: cm(c) + 'C 투입 — ' + MOD[k].u + ' 적용되었습니다.' };
-    save(); renderAll();
-  });
-  host.querySelectorAll('[data-part]').forEach(b => b.onclick = () => {
-    const k = b.dataset.part, v = cur();
-    if ((v.pt || []).length >= PART_SLOT || adaptOf(v, k) >= 2 || ((g.parts[k] | 0) <= 0)) return;
-    g.parts[k]--; v.pt.push(k);
-    S.msg = { t: PARTS[k].n + ' 장착', b: TERRAIN[k].n + ' 적성이 <b class="li">' + ADAPT_MARK[adaptOf(v, k)] + '</b> 로 올랐습니다.' };
-    save(); renderAll();
-  });
-  host.querySelectorAll('[data-unpart]').forEach(b => b.onclick = () => {
-    const i = +b.dataset.unpart, v = cur();
-    if (!v.pt || i < 0 || i >= v.pt.length) return;
-    const k = v.pt[i];
-    v.pt.splice(i, 1); g.parts[k] = (g.parts[k] | 0) + 1;
-    S.msg = { t: '파츠 탈거', b: PARTS[k].n + ' 을(를) 창고로 되돌렸습니다. (보유 ' + g.parts[k] + '개)' };
-    save(); renderAll();
-  });
-  host.querySelectorAll('[data-wl]').forEach(b => b.onclick = () => {
-    const i = +b.dataset.wl, v = cur(), B = UMAP[v.id], lv = v.wl[i] || 1, c = wlCost(B, lv);
-    if (lv >= wpMax(v, i) || c > g.cash) return;
-    g.cash -= c; v.wl[i] = lv + 1;
-    S.msg = { t: B.w[i].n + ' Lv' + v.wl[i], b: cm(c) + 'C 투입 — 위력 ' + cm(wpowOf(v, i)) + '로 상승했습니다.' };
-    save(); renderAll();
-  });
-
-  host.querySelectorAll('[data-buy]').forEach(b => b.onclick = () => {
-    const B = UMAP[b.dataset.buy], p = +b.dataset.price;
-    if (!B || g.garage.some(v => v.id === B.id) || g.lv < lvReqOf(B) || p > g.cash) return;
-    g.cash -= p; g.garage.push(mkOwned(B.id));
-    S.msg = { t: esc(B.nm) + ' 인수', b: cm(p) + 'C 지불. 【격납고】에서 탑승기를 변경할 수 있습니다.' };
-    save(); renderAll();
-  });
-
-  host.querySelectorAll('[data-ride]').forEach(b => b.onclick = () => {
-    g.cur = +b.dataset.ride;
-    S.msg = { t: '탑승기 변경', b: esc(UMAP[cur().id].nm) + '에 탑승했습니다.' };
-    save(); renderAll();
-  });
+  /* ---- 암시장 · 격납고 ---- */
+  host.querySelectorAll('[data-buy]').forEach(b => b.onclick = () => act({ k: 'mktbuy', id: b.dataset.buy }));
+  host.querySelectorAll('[data-ride]').forEach(b => b.onclick = () => act({ k: 'ride', i: +b.dataset.ride }));
   host.querySelectorAll('[data-sell]').forEach(b => b.onclick = () => {
-    const i = +b.dataset.sell;
-    if (g.garage.length <= 1 || i === g.cur) return;
-    const B = UMAP[g.garage[i].id], val = Math.round(buyPrice(B) * 0.55);
-    if (!confirm(B.nm + ' 을(를) ' + cm(val) + 'C에 매각합니다. 개조·파츠 투자분은 환불되지 않습니다.')) return;
-    g.garage.splice(i, 1); if (g.cur > i) g.cur--;
-    g.cash += val;
-    S.msg = { t: '매각 완료', b: esc(B.nm) + ' → ' + cm(val) + 'C' };
-    save(); renderAll();
+    const i = +b.dataset.sell, B = UMAP[g.garage[i].id];
+    if (!confirm(B.nm + ' 을(를) ' + cm(Math.round(buyPrice(B) * 0.55)) + 'C에 매각합니다. 개조·파츠 투자분은 환불되지 않습니다.')) return;
+    act({ k: 'sell', i: i });
   });
 
+  /* ---- 도감 · 페이지 (화면 전용) ---- */
   const bs = $('bookSeries'); if (bs) bs.onchange = () => { S.bookSr = bs.value; S.bookPg = 0; renderMain(); };
   host.querySelectorAll('[data-bookpg]').forEach(b => b.onclick = () => { S.bookPg = +b.dataset.bookpg; renderMain(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
   host.querySelectorAll('[data-shoppg]').forEach(b => b.onclick = () => { S.shopPg = +b.dataset.shoppg; renderMain(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
   host.querySelectorAll('[data-bk]').forEach(b => b.onclick = () => { S.bookSel = b.dataset.bk; renderMain(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
   host.querySelectorAll('[data-bkclose]').forEach(b => b.onclick = () => { S.bookSel = null; renderMain(); });
   const bq = $('bookQ');
-  if (bq) {
-    bq.oninput = () => { S.bookQ = bq.value; S.bookPg = 0; const p = bq.selectionStart; renderMain(); const n = $('bookQ'); if (n) { n.focus(); n.setSelectionRange(p, p); } };
-  }
+  if (bq) bq.oninput = () => { S.bookQ = bq.value; S.bookPg = 0; const p = bq.selectionStart; renderMain(); const n = $('bookQ'); if (n) { n.focus(); n.setSelectionRange(p, p); } };
 }
 
 /* ---------------- 다음 날 ---------------- */
 function nextDay() {
   if (S.busy) return;
-  g.day++;
-  const up = 1500 + g.lv * 400;
-  g.cash = Math.max(0, g.cash - up);
-  g.ap = g.apMax;
-  const tot = EVENTS.reduce((a, e) => a + e.p, 0);
-  let r = Math.random() * tot, ev = EVENTS[EVENTS.length - 1];
-  for (const e of EVENTS) { r -= e.p; if (r <= 0) { ev = e; break; } }
-  const txt = ev.f(g);
-  cur().hp = Math.min(cur().hp, uStat(cur()).hpMax);
-
-  /* 상점 발주 인도 (#5) */
-  const done = [];
-  g.orders = (g.orders || []).filter(o => {
-    if (g.day < o.due) return true;
-    if (g.garage.some(v => v.id === o.id)) { g.cash += Math.round(o.price * 0.5); done.push(UMAP[o.id].nm + ' <span class="dm">(중복 보유 — 50% 환불)</span>'); return false; }
-    g.garage.push(mkOwned(o.id)); done.push(UMAP[o.id].nm);
-    return false;
-  });
-
   S.view = 'main'; S.res = null;
-  S.msg = { t: 'DAY ' + g.day + ' — 아침 점호', b: '부대 유지비 <b class="rd">−' + cm(up) + 'C</b> 청구. 행동력 ' + g.apMax + ' 회복.<br>' + txt +
-    (done.length ? '<br><b class="li">발주 인도</b> — ' + done.map(esc).join(', ') + ' 이(가) 격납고에 들어왔습니다.' : '') +
-    '<br><span class="dm">암시장 매물이 새로 들어왔습니다.</span>' };
-  save(); renderAll();
+  act({ k: 'nextday' });
 }
 
-/* ---------------- 기동 ---------------- */
-$('aSave').onclick = () => { if (g) { save(); S.msg = { t: '저장 완료', b: '현재 진행 상황을 브라우저에 기록했습니다.' }; S.view = 'main'; renderAll(); } };
-$('aLoad').onclick = () => {
-  if (load()) { S.view = 'main'; S.msg = { t: '불러오기 완료', b: 'DAY ' + g.day + ' 시점의 기록을 복원했습니다.' }; renderAll(); }
-  else stamp('저장된 기록 없음');
-};
-$('aReset').onclick = () => {
+/* =========================================================================
+   기동
+   ========================================================================= */
+$('aCode').onclick = () => { S.view = 'code'; S.msg = null; renderAll(); };
+$('aReset').onclick = async () => {
   if (!confirm('기록을 완전히 말소하고 새 파일럿을 등록합니다.\n되돌릴 수 없습니다. 진행하시겠습니까?')) return;
-  try { localStorage.removeItem(SAVEKEY); } catch (e) {}
-  g = null; newSt = null; startPool = null; trAlloc = null; uAlloc = null; S.view = 'main'; S.msg = null;
-  stamp('기록 말소됨'); renderAll();
+  try {
+    const j = await post('/api/reset', {});
+    adopt(j);
+    newSt = null; startPool = null; trAlloc = null; uAlloc = null;
+    S.view = 'main'; S.msg = null;
+    stamp('기록 말소됨');
+  } catch (e) { S.msg = { t: '말소 실패', b: esc(e.message) }; }
+  renderAll();
 };
 
-if (load()) { stamp('기록 복원 — DAY ' + g.day); S.msg = { t: '귀환을 환영합니다', b: 'DAY ' + g.day + ' 시점부터 재개합니다.' }; }
-else stamp('신규 등록 필요');
-renderAll();
+(async function bootClient() {
+  try {
+    const j = await getJSON('/api/state');
+    adopt(j);
+    if (g) {
+      stamp('서버 기록 — DAY ' + g.day);
+      S.msg = { t: '귀환을 환영합니다', b: 'DAY ' + g.day + ' 시점부터 재개합니다.' };
+    } else {
+      stamp('신규 등록 필요');
+    }
+  } catch (e) {
+    stamp('서버에 연결하지 못했습니다');
+    S.msg = { t: '서버 연결 실패', b: esc(e.message) + '<br><span class="dm">서버가 떠 있는지 확인하십시오.</span>' };
+  }
+  renderAll();
+})();

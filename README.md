@@ -8,9 +8,19 @@ FF ADVENTURE 계열 **2d6 대항판정**으로 전투를 굴리고, 기체 제�
 상황이 잡히고, 각성 800 이상이면 **미래 예측**, HP 30% 이하에서는 **저력**이 발동한다.
 파일럿은 능력치 6종(상한 999) · **스킬 17종** 을, 기체는 **자체 레벨(최대 9999)** 을 따로 키운다.
 
-수록 기체 **1244기 전부**. 결과물은 `docs/` 폴더 하나(약 134MB)이고,
-그대로 **GitHub Pages 나 Vercel 에 올리거나** 로컬에서 `index.html` 을 열어 실행한다.
-외부 의존은 Google Fonts 스타일시트뿐이며, 실패해도 시스템 폰트로 대체된다.
+수록 기체 **1244기 전부**. **Node.js 서버 애플리케이션**이다 —
+게임 규칙과 세이브는 서버가 갖고, 브라우저는 화면만 그린다.
+세이브 저장소는 **MongoDB** 또는 로컬 파일 중에서 고른다.
+
+```bash
+npm install && node src/fetch-roster.mjs && node build.mjs && node server.mjs
+```
+
+> **v5.0 에서 구조가 바뀌었다.** 그전까지는 `docs/index.html` 한 장에 규칙까지
+> 다 들어간 순수 클라이언트 앱이었고 세이브는 `localStorage` 에 있었다.
+> 지금은 규칙이 `src/rules.mjs` 로 빠져 서버에서 돌고, 브라우저는 액션을
+> 보내고 결과를 받아 그리기만 한다. **게임 규칙 자체는 한 줄도 바꾸지 않았다**
+> ([§5.4 이관 검증](#54-이관이-정확한지-어떻게-확인했나) 참조).
 
 ---
 
@@ -21,8 +31,8 @@ FF ADVENTURE 계열 **2d6 대항판정**으로 전투를 굴리고, 기체 제�
 3. [디렉터리 구조](#3-디렉터리-구조)
 4. [데이터 파이프라인](#4-데이터-파이프라인)
 4-5. [한글화](#45-한글화)
-5. [빌드](#5-빌드)
-6. [실행 · 배포(GitHub Pages · Vercel)](#6-실행과-검증)
+5. [서버 구조](#5-서버-구조)
+6. [실행 · 배포(로컬 · MongoDB · Vercel)](#6-실행과-배포)
 7. [게임 설계 명세](#7-게임-설계-명세)
 8. [전투 규칙 전문](#8-전투-규칙-전문)
 9. [밸런스 — 상수와 근거](#9-밸런스--상수와-근거)
@@ -36,8 +46,14 @@ FF ADVENTURE 계열 **2d6 대항판정**으로 전투를 굴리고, 기체 제�
 
 ## 1. 5분 재현
 
-빈 디렉터리에 `build.mjs`, `serve.mjs`, 그리고 `src/` 의 다섯 파일
-(`head.html` `engine.js` `ui.js` `i18n.mjs` `fetch-roster.mjs`)을 놓은 뒤:
+빈 디렉터리에 `package.json` `build.mjs` `server.mjs` `vercel.json`,
+`api/index.mjs`, `test/`, 그리고 `src/` 의 일곱 파일
+(`head.html` `rules.mjs` `actions.mjs` `api.mjs` `store.mjs` `client.js`
+`i18n.mjs` `fetch-roster.mjs`)을 놓은 뒤:
+
+```bash
+npm install
+```
 
 ```bash
 node src/fetch-roster.mjs
@@ -48,11 +64,13 @@ node build.mjs
 ```
 
 ```bash
-node serve.mjs
+node server.mjs
 ```
 
 `http://localhost:8788/` 로 접속하면 끝. 수집은 1244기 기준 **약 5분**
 (상세 1244건 + 이미지 2488장 / 142MB)이고, 빌드는 즉시 끝난다.
+세이브는 `data/` 폴더에 쌓인다 — MongoDB 로 옮기려면
+[§6.2](#62-mongodb-로-옮기기) 참조.
 
 빠르게 확인만 하려면 등급별 3기씩만 받는다:
 
@@ -69,13 +87,15 @@ node src/fetch-roster.mjs --limit=3 && node build.mjs
 
 | 항목 | 버전 / 비고 |
 |---|---|
-| Node.js | **18 이상** (전역 `fetch` 필요). 검증 환경은 v20.15.0 |
+| Node.js | **20 이상** (서버가 최상위 `await` 를 쓴다). 검증 환경은 v20.15.0 |
 | 인터넷 | 최초 로스터 수집 때만. 이후 빌드·실행은 오프라인 가능 |
-| 브라우저 | 최신 Chrome / Edge / Firefox. `localStorage` 사용 |
+| 브라우저 | 최신 Chrome / Edge / Firefox. 쿠키 필요(세션 식별) |
 | 디스크 | 약 150MB (초상화 133MB + 썸네일 9.3MB + 나머지) |
-| sharp | **선택.** `--resize` 로 초상화를 줄일 때만 필요 (`npm i -D sharp`) |
+| **mongodb** | 세이브를 MongoDB 에 둘 때. `package.json` 의 유일한 런타임 의존성 |
+| sharp | **선택.** `--resize` 로 초상화를 줄일 때만 필요 |
 
-**필수 패키지 의존성은 없다.** 원본 해상도를 그대로 쓰면 `npm install` 자체가 불필요하다.
+MongoDB 를 안 쓸 거면 `npm install --omit=optional` 없이도 무방하다 —
+`MONGODB_URI` 가 없으면 드라이버를 아예 `import` 하지 않고 파일 저장소로 간다.
 
 ---
 
@@ -83,45 +103,35 @@ node src/fetch-roster.mjs --limit=3 && node build.mjs
 
 ```
 .
-├── build.mjs              조각들을 docs/index.html 로 합침
-├── serve.mjs              docs/ 를 정적 서버로 띄움 (Pages 와 같은 조건)
-├── package.json           npm run fetch / build / serve
-├── vercel.json            Vercel 배포 설정 (outputDir·캐시 헤더)
-├── README.md              이 문서
-├── docs/                  ← 배포 대상. 통째로 GitHub Pages 에 올린다
-│   ├── index.html         0.91MB — 코드 + 1244기 데이터 인라인
+├── server.mjs             Node HTTP 서버 — /api 는 src/api.mjs, 나머지는 docs/
+├── build.mjs              docs/index.html · docs/app.js 생성
+├── package.json           npm start / build / fetch / sim / test
+├── vercel.json            Vercel 배포 설정 (함수 라우팅·캐시 헤더)
+├── api/
+│   └── index.mjs          Vercel 서버리스 진입점 (src/api.mjs 재사용)
+├── test/
+│   ├── sim.mjs            밸런스 시뮬레이터 (서버 없이 전투만 대량 실행)
+│   └── e2e.mjs            API 종단 점검 (정상 동작 + 변조 요청 거절)
+├── data/                  파일 저장소일 때 세이브가 쌓이는 곳 (git 제외)
+├── docs/                  정적 자산 — 그대로 CDN 에 올려도 된다
+│   ├── index.html         0.02MB — 골격 + CSS 만
+│   ├── app.js             1.06MB — 로스터 + 규칙 + 클라이언트
 │   ├── img/               초상화 936x803 · 1244장 · 133MB
-│   ├── th/                썸네일 128x128 · 1244장 · 9.3MB
-│   └── .nojekyll          Jekyll 처리 비활성화
+│   └── th/                썸네일 128x128 · 1244장 · 9.3MB
 └── src/
     ├── fetch-roster.mjs   GGen DB API → roster.json + docs/img · docs/th
-    ├── i18n.mjs           빌드 시점 한글화 사전 (무장·특성·시리즈)
+    ├── i18n.mjs           수집 시점 한글화 사전 (무장·특성·시리즈)
     ├── roster.json        기체 1244기 데이터 (0.95MB, 이미지는 경로만)
-    ├── head.html          <title>·CSS·마크업 골격 + <script> 여는 태그
-    ├── engine.js          상수 / 세이브 / 파생수치 / 전투 엔진
-    └── ui.js              렌더링 / 화면 10종 / 이벤트 바인딩 / 부팅
+    ├── head.html          <title>·CSS·마크업 골격
+    ├── rules.mjs          게임 규칙 — 상수·판정·전투. 서버·클라 공용
+    ├── actions.mjs        액션 처리와 검증 (서버 전용)
+    ├── api.mjs            HTTP 라우팅·세션 (서버 전용)
+    ├── store.mjs          세이브 저장소 — mongo / file (서버 전용)
+    └── client.js          렌더링 · 전투 재생 · 액션 전송 (브라우저 전용)
 ```
 
-### 왜 조각으로 나눠 두는가
-
-`roster.json` 이 0.95MB라 통짜 HTML을 직접 편집하면 에디터가 느려지고, 게임 로직
-한 줄 고칠 때마다 거대한 데이터 블록을 스크롤해야 한다. 데이터와 코드를 분리해
-두면 로직만 편집하고 `node build.mjs` 로 합친다.
-
-### 결합 순서 (build.mjs)
-
-```
-head.html                    ← <!DOCTYPE> ~ <script> "use strict";
-  + "const UNITS = " + roster.json + ";"
-  + engine.js
-  + ui.js
-  + "</script></body></html>"
-```
-
-`ui.js` 맨 끝의 `renderAll()` 이 부팅을 담당하므로 **engine → ui 순서를 지켜야 한다.**
-
-이미지는 HTML 에 들어가지 않는다. `docs/img/` · `docs/th/` 에 개별 파일로 있고
-HTML 에는 `img/1001000150.webp` 같은 **상대경로만** 들어간다.
+**서버 전용 세 파일(actions·api·store)은 브라우저 번들에 들어가지 않는다.**
+검증 로직이 클라이언트로 새면 서버에 두는 의미가 없다.
 
 ---
 
@@ -293,7 +303,7 @@ UR 114 · SSR 350 · SR 365 · R 313 · N 102  =  1244기
 버티는 지점(128px)에서 갈랐다.
 
 ```js
-// src/ui.js
+// src/client.js
 const picFor = (B, cls) => (cls === 'l' || cls === 'xl') ? B.img : (B.th || B.img);
 // .s 44px · .m 72px  → 썸네일
 // .l 104px · .xl 132px → 초상화
@@ -364,96 +374,201 @@ node --input-type=module -e "import fs from 'node:fs';import{trWeapon,trAbilityN
 
 ---
 
-## 5. 빌드
+## 5. 서버 구조
+
+### 5.1 무엇이 어디로 갔나
+
+| 하는 일 | v4 (클라이언트 단독) | v5 (Node.js 서버) |
+|---|---|---|
+| 게임 규칙 | `engine.js` (브라우저) | `src/rules.mjs` — **서버가 실행** |
+| 액션 검증 | 없음 (클라이언트가 자기 세이브를 직접 고침) | `src/actions.mjs` — 서버가 판단 |
+| 세이브 | `localStorage` | MongoDB 또는 `data/*.json` |
+| 전투 | 브라우저에서 굴리며 그림 | 서버가 끝까지 계산 → 연출 이벤트로 재생 |
+| 화면 | `ui.js` | `src/client.js` (그리기 전용) |
+
+구식 CGI 였다면 클릭 한 번에 `index.cgi?mode=xxx` 로 가서 HTML 한 장을 통째로
+받아 왔을 것이다. 여기서는 그 자리를 `POST /api/act` 가 대신하되,
+**연출은 잃지 않는다** ([5.3](#53-전투를-서버로-옮기면서-연출을-지킨-방법)).
+
+### 5.2 요청 한 번의 흐름
+
+```
+[브라우저] 【훈련】 사격 클릭
+    │  act({ k:'train', stat:'sho' })
+    ▼
+POST /api/act              쿠키 gow_pid 로 플레이어 식별
+    │
+    ├─ store.get(pid)      세이브를 꺼낸다
+    ├─ applyAction(g, a)   ── actions.mjs
+    │     · 없는 능력치인가?           → 400
+    │     · 올드타입이라 각성이 잠겼나? → 400
+    │     · 행동력이 있나?             → 400
+    │     · rules.mjs 로 판정하고 g 를 고친다
+    ├─ store.put(pid, g)   저장
+    ▼
+{ g, out:{ res } }         새 세이브 + 판정 결과
+    │
+    ▼
+[브라우저] setState(g) → renderAll()
+```
+
+`out.msg` 는 안내 상자에, `out.res` 는 훈련 결과 상자에, `out.battle` 은
+전투 재생에 쓰인다. **클라이언트가 세이브를 직접 고치는 코드는 한 줄도 없다.**
+
+### 5.3 전투를 서버로 옮기면서 연출을 지킨 방법
+
+전투를 서버에서 끝까지 굴리면 결과만 남고 라운드별 연출이 사라진다.
+그래서 `resolveBattle()` 은 **화면 갱신 순서를 그대로 기록**해서 돌려준다.
+
+```js
+{ t:'l', h, c }              로그 한 줄
+{ t:'b', a, d, u }           상황판 — 행동 유닛·거리·유닛별 hp/en/은신
+{ t:'d', a, x, w, m, k, n }  교전 표시 — 공격/피격·무장·피해·종류·대사
+{ t:'w', ms }                연출 대기
+```
+
+클라이언트는 이 배열을 순서대로 훑으며 `bl()` · `paintBoard()` · `paintDuel()` 을
+부르고 `{t:'w'}` 에서 `await sleep(ms)` 한다. 즉 **v4 의 `runBattle()` 이 하던 일을
+그대로, 다만 판정 없이** 반복한다. 【연출 생략】 버튼도 그대로 먹는다.
+
+한 전투의 크기는 실측 **15KB / 이벤트 180개** 정도다. 유닛 이름·초상화 같은
+정적 정보는 `cast` 로 한 번만 보내고, 이후 이벤트는 인덱스로만 가리킨다.
+
+### 5.4 이관이 정확한지 어떻게 확인했나
+
+"게임 방식을 그대로 유지"가 요구사항이었으므로 **승률 비교로는 부족하다.**
+1244기 로스터에서 적 편성이 매번 달라지기 때문에 N=150 으로 돌려도
+같은 엔진끼리 57%~70% 를 오간다. 실제로 신·구 승률 차이는 −2.7%p 에서
++13.3%p 까지 흩어졌고 부호도 뒤섞였다 — 이걸로는 아무것도 증명하지 못한다.
+
+그래서 **결정론적 함수를 1:1 로 대조**했다. 구 `engine.js` 를 `vm` 컨텍스트에
+올리고, 신 `rules.mjs` 와 같은 입력·같은 난수열을 먹인 뒤 출력을 비교한다.
+
+| 대조 항목 | 건수 |
+|---|---|
+| `uStat` · `effStats` · `penMul` · 지형 적성 · 가격 · 암시장 | 360 |
+| `mkPlayer` (능력치·전법·지형·무장 사거리·EN) | 60 |
+| `hitAdv` · `calcDmg` · `critNeed` · `armed` · `chooseWep` · 색적/이동 보정 | 80세트 |
+
+스킬 6종 조합 × 전법 4종 × 전장 5종 × 정예/지휘기 × 저력 × 사거리 밖 상태를
+돌려 **불일치 0건**. 규칙은 옮겨지기만 했고 바뀌지 않았다.
+
+### 5.5 빌드
 
 ```bash
 node build.mjs      # 또는 npm run build
 ```
 
-`src/head.html` + `roster.json` + `engine.js` + `ui.js` 를 이어 붙여
-`docs/index.html` 을 만든다. 경로는 `import.meta.url` 기준이라 **어느 디렉터리에서
-실행해도 동작한다.**
+* `docs/index.html` ← `src/head.html` 에서 인라인 `<script>` 를 떼고
+  `<script src="app.js" defer>` 를 건다
+* `docs/app.js` ← `로스터` + `rules.mjs` + `client.js`
 
-문법 검사만 따로 하려면:
+`rules.mjs` 는 서버에서 `import` 하는 ES 모듈이지만 브라우저에는 번들러 없이
+이어 붙인다. 그래서 맨 끝 `export` 블록을 잘라내는데, **잘라내는 지점 표시는
+반드시 한 줄짜리 주석이어야 한다** ([§11.21](#1121-여러-줄-주석-한가운데를-자르면-뒤가-통째로-먹힌다)).
 
-```bash
-sed -n '/^"use strict";$/,/^</script>$/p' docs/index.html | sed '$d' > _chk.js && node --check _chk.js && rm _chk.js
-```
+`rules.mjs` 와 `client.js` 는 **같은 스코프를 공유한다.** `client.js` 가
+`g` 를 그대로 읽을 수 있는 이유이자, `client.js` 에서 `g` 를 다시 선언하면
+안 되는 이유다. 값을 바꿀 때는 `setState()` 를 쓴다.
 
 ---
 
-## 6. 실행과 검증
+## 6. 실행과 배포
 
-### 로컬 실행
-
-```bash
-node serve.mjs      # 또는 npm run serve  →  http://localhost:8788/
-```
-
-`docs/index.html` 을 브라우저로 직접 열어도 동작한다. 이미지가 상대경로라
-`file://` 에서도 문제없다. 다만 브라우저 설정에 따라 `localStorage` 가 막혀
-세이브가 안 될 수 있으므로(우상단이 계속 `저장 실패`) 그때는 서버를 쓴다.
-
-### GitHub Pages 배포
-
-`docs/` 폴더를 그대로 올리면 된다. 저장소 루트에서:
+### 6.1 로컬 실행
 
 ```bash
-git init -b main
-git add -A
-git commit -m "G-Over World"
-git remote add origin https://github.com/<계정>/<저장소>.git
-git push -u origin main
+npm install
+node build.mjs
+node server.mjs            # 또는 npm start  →  http://localhost:8788/
+PORT=3000 node server.mjs
 ```
 
-그다음 저장소 **Settings → Pages** 에서
+세이브는 `data/<플레이어코드>.json` 에 쌓인다. 임시 파일에 쓰고 `rename` 하므로
+쓰다 죽어도 세이브가 반쯤 남지 않는다.
 
-- **Source**: Deploy from a branch
-- **Branch**: `main` / **폴더**: `/docs`
+> **`docs/index.html` 을 브라우저로 직접 열면 안 된다.** v4 까지는 됐지만
+> 이제 `/api/*` 가 필요하다. 반드시 서버를 거칠 것.
 
-로 지정하면 1~2분 뒤 `https://<계정>.github.io/<저장소>/` 에서 열린다.
+점검:
 
-| 제약 | 값 | 현재 |
+```bash
+node test/e2e.mjs          # 서버를 띄운 상태에서. 정상 동작 + 변조 요청 거절
+node test/sim.mjs          # 밸런스 시뮬레이터 (서버 불필요)
+```
+
+### 6.2 MongoDB 로 옮기기
+
+MongoDB Atlas **무료 티어(M0, 512MB)** 면 충분하다. 세이브 하나가 1KB 안팎이라
+5명이 몇 년을 놀아도 남는다.
+
+1. [cloud.mongodb.com](https://cloud.mongodb.com) 에서 M0 클러스터 생성
+2. **Database Access** 에서 사용자 하나 추가
+3. **Network Access** 에서 접속 IP 허용
+   (Vercel 처럼 IP 가 고정되지 않는 곳은 `0.0.0.0/0` — 계정·비밀번호로만 막힌다)
+4. 연결 문자열을 환경변수로 넘긴다
+
+```bash
+MONGODB_URI="mongodb+srv://사용자:비밀번호@클러스터.mongodb.net/?retryWrites=true&w=majority" \
+  node server.mjs
+```
+
+기동 로그에 `세이브 저장소 : mongo (gover.saves)` 가 뜨면 붙은 것이다.
+연결에 실패하면 이유를 한 줄로 찍고 종료한다.
+
+| 환경변수 | 기본값 | 설명 |
 |---|---|---|
-| 파일 1개 최대 | 100MB (Git 하드 제한) | 최대 250KB |
-| 게시 사이트 최대 | 1GB | 134MB |
-| 대역폭 | 월 100GB (소프트) | — |
+| `MONGODB_URI` | (없음) | 없으면 파일 저장소 |
+| `MONGODB_DB` | `gover` | 데이터베이스 이름 |
+| `MONGODB_COLLECTION` | `saves` | 컬렉션 이름 |
+| `SAVE_DIR` | `./data` | 파일 저장소 경로 |
+| `PORT` | `8788` | 서버 포트 |
 
-`docs/.nojekyll` 이 있어야 Jekyll 이 `_` 로 시작하는 경로를 지우지 않는다.
-`.gitignore` 는 `node_modules/` 와 중간 캐시를 제외하고 `docs/` 는 **커밋에 포함한다**
-(Pages 가 빌드 결과물을 그대로 서빙하므로 산출물이 저장소에 있어야 한다).
+문서 모양은 `{ _id: 플레이어코드, g: 세이브, updated, created }` 다.
+**연결은 모듈 전역에 캐시한다** — 서버리스에서 요청마다 새로 연결하면
+커넥션이 폭발한다.
 
-### Vercel 배포
+### 6.3 Vercel 배포
 
-`vercel.json` 이 저장소에 들어 있어 별도 설정 없이 연결만 하면 된다.
-
-1. [vercel.com/new](https://vercel.com/new) → GitHub 계정 연결 → `G_Over_World` 선택
-2. 설정 화면은 **그대로 두고 Deploy**
-   (`vercel.json` 이 Output Directory `docs`, 빌드 명령 없음을 이미 지정한다)
-3. 1~2분 뒤 `https://<프로젝트명>.vercel.app` 에서 열린다
-
-이후 `git push` 할 때마다 자동 재배포되고, 브랜치마다 프리뷰 URL이 따로 생긴다.
-
-```json
-{
-  "outputDirectory": "docs",
-  "buildCommand": null,
-  "headers": [{
-    "source": "/(img|th)/(.*)",
-    "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
-  }]
-}
+```
+vercel.json    /api/* → api/index.mjs (서버리스 함수)
+               나머지 → docs/ 정적 서빙
 ```
 
-**이미지에 1년 불변 캐시를 거는 것이 Vercel 을 쓰는 실질적 이유다.**
-파일명이 기체 ID 라 내용이 절대 바뀌지 않으므로 안전하고, 재방문자는
-이미지 재검증 요청이 아예 사라진다. GitHub Pages 는 모든 파일에
-`max-age=600` 이 고정이라 이 설정이 불가능하다.
+1. [vercel.com/new](https://vercel.com/new) → 저장소 선택
+2. **Environment Variables** 에 `MONGODB_URI` 추가 — **이게 없으면 동작하지 않는다.**
+   Vercel 의 파일 시스템은 읽기 전용이라 파일 저장소를 쓸 수 없다.
+   (빠뜨리면 API 가 그 사실을 한국어로 알려 준다.)
+3. Deploy
+
+`vercel.json` 의 `functions.includeFiles` 가 `src/roster.json` 을 함수 번들에
+같이 넣는다. 이게 없으면 함수가 로스터를 못 읽어 500 이 난다.
+
+> **검증 범위를 밝혀 둔다.** 파일 저장소 경로와 MongoDB **연결 실패** 경로는
+> 실제로 돌려 확인했지만, 살아 있는 Atlas 클러스터에 붙는 것과 Vercel 배포는
+> 연결 문자열이 없어 확인하지 못했다. 저장소 어댑터를 파일/Mongo 로 나눠 둔 것도
+> 그래서다 — 전 기능을 파일 백엔드로 검증했고, Mongo 는 같은 인터페이스만 채운다.
+
+### 6.4 GitHub Pages 는 더 이상 쓸 수 없다
+
+Pages 는 정적 파일만 서빙한다. 서버가 필요해진 이상 선택지에서 빠진다.
+
+| 배포처 | 가능 | 필요한 것 |
+|---|---|---|
+| GitHub Pages | ✕ | — (정적 전용) |
+| Vercel | ○ | `MONGODB_URI` |
+| Render · Fly.io · VPS | ○ | `npm start`, 세이브는 파일 또는 Mongo |
+| 로컬 | ○ | 없음 |
+
+**정적 배포로 돌아가고 싶다면** v4 태그 시점의 `engine.js` + `ui.js` 를 되살리면
+된다. 규칙은 `rules.mjs` 에 그대로 있으므로, `actions.mjs` 를 브라우저로 옮기고
+저장을 `localStorage` 로 되돌리는 정도의 작업이다.
 
 #### 대역폭
 
-둘 다 월 100GB. 이 사이트는 **한 명이 전 기체를 열람해도 134MB** 가 상한이라
-5인이 매일 놀아도 월 1~4GB(한도의 1~4%)다. 사실상 제약이 아니다.
+이미지가 여전히 전체 용량의 97% 다. 한 명이 전 기체를 열람해도 134MB 가
+상한이라 5인이 매일 놀아도 월 1~4GB — Vercel Hobby 100GB 의 1~4% 다.
+`vercel.json` 이 이미지에 1년 불변 캐시를 걸므로 재방문 비용은 거의 0 이다.
 
 | 1인 1세션 (캐시 없는 첫 접속) | 사용량 |
 |---|---|
@@ -461,15 +576,17 @@ git push -u origin main
 | 보통 — 전투 30회 + 도감 한 바퀴 | 24MB |
 | 이론상 최대 — 1244기 전부 열람 | 134MB |
 
-### 세이브 초기화
+### 6.5 세이브 · 플레이어 코드
 
-브라우저 콘솔에서:
+세이브는 서버에 있고, 브라우저는 `gow_pid` 쿠키(24자리 16진수)로 식별된다.
 
-```js
-localStorage.removeItem('gover.world.v5'); location.reload();
-```
-
-화면 우상단 `【기록말소】` 버튼도 같은 일을 한다(확인 창 있음).
+* **다른 기기에서 이어하기** — 화면 우상단 `【이어하기 코드】` 에 뜨는 코드를
+  그쪽 브라우저의 같은 화면에 넣는다.
+* **기록 말소** — `【기록말소】` (확인 창 있음). 서버에서 지운다.
+* 코드는 `crypto.randomBytes(12)` 로 만든다. **추측 가능하면 남의 세이브가
+  열리므로** 반드시 CSPRNG 를 쓸 것.
+* 코드를 아는 사람은 그 기록을 열 수 있다. 4~5인이 함께 노는 용도로는
+  충분하지만, 비밀번호가 아니라는 점은 화면에도 적어 두었다.
 
 ---
 
@@ -477,8 +594,9 @@ localStorage.removeItem('gover.world.v5'); location.reload();
 
 ### 7.1 세이브 상태 (`g`)
 
-`localStorage['gover.world.v5']` 에 JSON으로 통째 저장. 이미지·제원은 저장하지
-않고 **`id` 만** 들고 있다가 `UMAP[id]` 로 참조한다. 세이브 크기는 수 KB.
+**서버가 소유한다.** MongoDB 문서 또는 `data/<플레이어코드>.json` 에 통째로
+들어가고, 브라우저에는 그리기 위한 사본만 내려간다. 이미지·제원은 저장하지
+않고 **`id` 만** 들고 있다가 `UMAP[id]` 로 참조한다. 실측 크기 **0.7KB**.
 
 ```js
 {
@@ -509,10 +627,11 @@ localStorage.removeItem('gover.world.v5'); location.reload();
 
 로드할 때 `UMAP[id]` 로 실재 여부를 검증하고, 없는 기체는 걸러낸다.
 **로스터를 바꾸면 기존 세이브의 일부 기체가 사라질 수 있다.**
-세이브 구조를 바꿨다면 `SAVEKEY` 의 버전을 올려 옛 세이브가 섞이지 않게 한다
-(v3 → v4 에서 능력치 체계·소속·파츠가, v4 → v5 에서 스킬·기체 레벨·발주가 들어와
-각각 호환되지 않는다). `load()` 는 누락 필드를 채워 넣으므로 같은 버전 안에서는
-구조가 조금 자라도 옛 세이브가 깨지지 않는다.
+
+세이브 구조가 자라도 옛 기록이 깨지지 않도록 `load()` 가 누락 필드를 채운다
+(`pt` · `sk` · `eq` · `parts` · `orders` · `inv` · `ulv` …). 이 보정은 이제
+`api.mjs` 가 세이브를 꺼낼 때가 아니라 **`rules.mjs` 의 마이그레이션 자리**에
+있어야 한다 — 클라이언트가 세이브를 만들지 않기 때문이다.
 
 ### 7.2 캐릭터 능력치
 
@@ -1181,7 +1300,7 @@ EXP  = (10 + 등급인덱스 × 26) × (보스 5 / 에이스 2.5 / 잡졸 1)
 
 ## 9. 밸런스 — 상수와 근거
 
-### 9.1 상수표 (`src/engine.js` 상단)
+### 9.1 상수표 (`src/rules.mjs` 상단)
 
 | 상수 | 값 | 역할 |
 |---|---|---|
@@ -1299,107 +1418,64 @@ Lv3 은 오차 범위를 조금 웃도는 수준이고, **Lv10 이 되어야 판
 
 ---
 
-## 10. 밸런스 검증 시뮬레이터
+## 10. 검증 도구
 
-상수를 만졌다면 반드시 돌려볼 것. **Node 의 `vm` 으로 `src/engine.js` 를 그대로
-실행한다.** 게임의 실제 함수(`runBattle`, `mkPlayer`, `buildFoes`, `hitAdv`,
-`calcDmg`)를 그 자리에서 호출하므로 수식 중복이 없고, 세이브도 건드리지 않는다.
-
-> 브라우저 콘솔에 붙여넣는 방식은 쓰지 않는다. **배경 탭에서 `setTimeout` 이
-> 1초로 throttle 되어** 한 전투에 수십 초가 걸리기 때문이다
-> ([§11.6](#116-배경-탭에서-settimeout-이-throttle된다)).
-
-**`sim.mjs`** — 엔진을 DOM 없이 올린다.
-
-```js
-import fs from 'node:fs';
-import vm from 'node:vm';
-import path from 'node:path';
-
-const ROOT = process.argv[2] || 'D:/G';
-export const ctx = vm.createContext({
-  UNITS: JSON.parse(fs.readFileSync(path.join(ROOT, 'src/roster.json'), 'utf8')),
-  document: { getElementById: () => null },        // 렌더 계열은 전부 null 가드에 걸린다
-  localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
-  setTimeout: (f) => { f(); return 0; },           // 연출 대기를 0으로
-  console, Math, JSON, Date,
-  renderAll: () => {}, renderMain: () => {}, renderLeft: () => {}, renderCmd: () => {},
-  confirm: () => true, window: {}
-});
-vm.runInContext(fs.readFileSync(path.join(ROOT, 'src/engine.js'), 'utf8'), ctx,
-                { filename: 'engine.js' });
-export { vm };
-```
-
-**`run.mjs`** — 전장 × 임무별 승률표.
-
-```js
-import { ctx, vm } from './sim.mjs';
-const R = c => vm.runInContext(c, ctx);
-
-/* 레벨에 맞는 표준 파일럿 — 초기 120pt + 레벨업 5pt/레벨을 여섯 능력에 고르게 */
-function setup(lv, uid, wl, ter, mods) {
-  R(`(function(){
-    const tot = START_PT + (${lv}-1)*LVUP_PT, per = Math.floor(tot/6), st = {};
-    STK.forEach(k => st[k] = per); st.sho += tot - per*6;
-    newGame('t', st, ${JSON.stringify(uid)}); g.lv = ${lv}; g.pt = 0;
-    const v = cur(); v.wl = v.wl.map(()=>${wl});
-    if (${mods|0}) Object.keys(MOD).forEach(k => v.mod[k] = ${mods|0});
-    v.hp = uStat(v).hpMax;
-  })()`);
-}
-/* 그 전장에 ○ 적성이 있는 기체 중 성능 중앙값 */
-const unitFor = (rar, ter) => R(`(function(){
-  const p = UNITS.filter(u => u.rar===${JSON.stringify(rar)} && u.w.length
-                           && adaptBase(u, ${JSON.stringify(ter)}) === 2);
-  return p.sort((a,c)=>uPow(a)-uPow(c))[Math.floor(p.length/2)].id })()`);
-
-const PLAN = [['ptrl',1,'N',1,0], ['swp',4,'R',2,0], ['base',8,'SR',3,1],
-              ['itcp',14,'SSR',4,2], ['final',20,'UR',5,3]];
-const N = 50;
-
-for (const ter of ['sp','gr','ai','uw','se']) {
-  console.log('\u25a0 ' + R(`TERRAIN[${JSON.stringify(ter)}].n`));
-  for (const [mid, lv, rar, wl, mods] of PLAN) {
-    const uid = unitFor(rar, ter);
-    let w=0, l=0, d=0, hp=0;
-    for (let i = 0; i < N; i++) {
-      setup(lv, uid, wl, ter, mods);
-      R('S.skip = true');                      // runBattle 은 시작 시 S.skip 을 false 로 되돌린다
-      await R(`runBattle(MISSION.find(m=>m.id===${JSON.stringify(mid)}),
-                         'norm', ${JSON.stringify(ter)})`);
-      const r = R('S.res.r');
-      if (r === 'win') w++; else if (r === 'lose') l++; else d++;
-      hp += R('Math.round(cur().hp / uStat(cur()).hpMax * 100)');
-    }
-    console.log('  ' + R(`MISSION.find(m=>m.id===${JSON.stringify(mid)}).n`).padEnd(14) +
-      ` \uc2b9${String(Math.round(w/N*100)).padStart(4)}%` +
-      ` \ud328${String(Math.round(l/N*100)).padStart(4)}%` +
-      ` \ubb34${String(Math.round(d/N*100)).padStart(4)}%` +
-      `  \uc794\uc5ecHP${String(Math.round(hp/N)).padStart(4)}%`);
-  }
-}
-```
+### 10.1 밸런스 시뮬레이터
 
 ```bash
-node run.mjs           # 전 전장 × 5임무 × 50회 — 수 분
+node test/sim.mjs
+TERS=sp,gr,ai,uw,se N=50 node test/sim.mjs
 ```
 
-**진단용 카운터.** 승률만 봐서는 원인을 못 찾는다. 무승부가 늘었을 때는
-로그를 세어 어디서 라운드가 새는지 본다.
+**서버를 띄우지 않는다.** 규칙 모듈을 그대로 `import` 해서 전투만 대량으로 돌린다.
 
 ```js
-const log = R('S.blog.join(String.fromCharCode(10))');
-console.log(
-  '\ub77c\uc6b4\ub4dc',   (log.match(/ROUND /g) || []).length,
-  '\uc0ac\uac70\ub9ac\ubc16', (log.match(/\uc4f8 \uc218 \uc788\ub294 \ubcd1\uc7a5\uc774 \uc5c6\ub2e4/g) || []).length,
-  '\ub85c\uc2a4\ud2b8', (log.match(/\ud45c\uc801\uc744 \uc7a1\uc9c0 \ubabb\ud588\ub2e4/g) || []).length,
-  '\uba85\uc911',   (log.match(/\ub370\ubbf8\uc9c0/g) || []).length,
-  '\ud68c\ud53c',   (log.match(/\ud68c\ud53c!/g) || []).length);
+import * as R from '../src/rules.mjs';
+R.initRules(JSON.parse(fs.readFileSync('../src/roster.json', 'utf8')));
+...
+const out = R.resolveBattle(R.MISSION.find(m => m.id === mid), 'norm', ter);
+if (out.res.r === 'win') w++;
 ```
 
-이 카운터로 [§11.12](#1112-능력치-스케일을-바꾸면-명중식-비율이-무너진다)(명중률 16%)와
-[§11.13](#1113-거리-개념을-넣으면-무승부가-폭증한다)(이동에만 7라운드)을 잡아냈다.
+> v4 까지는 `engine.js` 가 DOM 과 `setTimeout` 을 붙들고 있어서 `vm` 컨텍스트에
+> 가짜 `document` 와 즉시 실행 `setTimeout` 을 심어야 했다. 규칙을 분리한 뒤로는
+> 그냥 `import` 하면 된다. **서버로 옮기면서 딸려 온 실질적인 이득이다.**
+
+### 10.2 API 종단 점검
+
+```bash
+node server.mjs        # 다른 터미널
+node test/e2e.mjs
+BASE=https://내주소 node test/e2e.mjs
+```
+
+브라우저 없이 HTTP 만으로 한 판을 돌린다. 정상 동작뿐 아니라
+**클라이언트가 거짓말을 해도 서버가 막는지**를 함께 본다.
+
+```
+OK  합계 틀린 new 거절        초기 능력치 합계는 120 이어야 합니다.
+OK  계급/자금 부족 발주 거절    계급이 부족합니다.
+OK  오늘 매물 아닌 것 거절      오늘 매물이 아닙니다.
+OK  보유 초과 배분 거절        보유 포인트를 넘었습니다.
+```
+
+이 네 줄이 v5 의 존재 이유다. v4 에서는 콘솔에서 `g.cash = 1e9` 한 줄이면
+끝났지만, 지금은 서버가 자기 세이브를 보고 판단한다.
+
+### 10.3 이관 회귀 시험 (일회성)
+
+v4 → v5 로 규칙을 옮길 때 쓴 방법이다. 승률 비교로는 표본 오차에 묻히므로
+**결정론적 함수를 1:1 로 대조**했다 ([§5.4](#54-이관이-정확한지-어떻게-확인했나)).
+
+```js
+/* 구 engine.js 를 vm 에 올리고, 같은 입력·같은 난수열을 먹인다 */
+const oldRnd = mk(seed), newRnd = mk(seed);
+ctx.Math.random = oldRnd; Math.random = newRnd;
+eq('mkPlayer', V('...mkPlayer(tac, ter)...'), JSON.stringify(R.mkPlayer(tac, ter)));
+```
+
+`Math` 를 `Object.create(Math)` 로 감싸 `vm` 컨텍스트에 넣으면 `random` 만
+바꿔치기할 수 있다. 규칙을 크게 손볼 때 같은 방법을 다시 쓸 수 있다.
 
 ---
 
@@ -1611,6 +1687,84 @@ node -e "const fs=require('fs');fs.writeFileSync('src/roster.json',
 
 **단, `i18n.mjs` 도 같이 고쳐야 한다.** 안 그러면 다음 재수집에서 되돌아온다.
 
+### 11.21 여러 줄 주석 한가운데를 자르면 뒤가 통째로 먹힌다
+
+`rules.mjs` 를 브라우저 번들에 넣을 때 맨 끝 `export` 블록을 잘라내야 한다.
+처음에는 `lastIndexOf('export {')` 로 잘랐는데, 그 앞 주석이 이랬다.
+
+```js
+/* =========================================
+   내보내기 — build.mjs 는 이 블록을 떼고 …
+   /* @@EXPORTS@@ */
+export { ... };
+```
+
+중첩 `/*` 는 **첫 `*/` 에서 주석이 끝난다.** 그 지점을 자르면 열린 주석이 남아
+바로 뒤에 붙인 `initRules(ROSTER);` 를 통째로 삼켰다. 증상은
+`UNITS.length === 0` — 로스터를 1244개 실어 놓고 목록이 텅 비었다.
+
+절단 표시는 **반드시 한 줄짜리 주석**으로 두고, 그 줄을 통째로 찾는다.
+
+```js
+const MARK = '/* @@BROWSER_CUT@@';
+const rulesBrowser = rules.slice(0, rules.indexOf(MARK));
+```
+
+### 11.22 모듈 전역 상태를 서버에서 쓰려면 '동기'가 조건이다
+
+`rules.mjs` 는 세이브를 모듈 지역 변수 `g` 하나로 들고 `setState()` 로 갈아 끼운다.
+40개 함수에 `g` 를 인자로 흘리지 않아도 되니 이관이 훨씬 안전했지만,
+여러 플레이어가 붙는 서버에서는 위험해 보인다.
+
+**안전한 이유는 모든 진입점이 완전히 동기이기 때문이다.** Node 는 동기 실행
+중간에 다른 요청으로 넘어가지 않는다. 그래서 `applyAction()` 안에서 `await` 가
+한 번도 나오지 않는 한 상태가 섞일 수 없다.
+
+```js
+R.setState(g);
+try { return { out: fn(g, a), g: R.getState() }; }
+finally { R.setState(null); }        // 다음 요청에 남기지 않는다
+```
+
+이 불변식이 깨지는 순간(예: 전투 중에 DB 를 읽으려고 `await` 를 넣는 순간)
+플레이어끼리 세이브가 섞인다. `rules.mjs` 와 `actions.mjs` 상단에
+**"이 파일에서는 await 를 쓰지 말 것"** 을 못 박아 둔 이유다.
+
+### 11.23 서버로 옮기면 사라지는 것 — 마이그레이션
+
+v4 의 `load()` 는 세이브를 꺼내면서 누락 필드를 채우는 일까지 했다.
+그 함수를 클라이언트에서 걷어내자 **마이그레이션도 같이 사라졌다.**
+새 세이브는 `newGame()` 이 모든 필드를 만들어 주므로 한동안 티가 안 난다.
+
+세이브를 만드는 주체가 바뀌면 **마이그레이션이 어디로 가야 하는지 먼저 정할 것.**
+지금은 `rules.mjs` 의 `migrate()` 가 맡고, 저장소에서 꺼낼 때마다 통과시킨다.
+
+```js
+const load = async (store, pid) => R.migrate(await store.get(pid));
+```
+
+### 11.24 서버리스에서 DB 클라이언트는 모듈 전역에 캐시할 것
+
+Vercel 함수는 인스턴스를 재사용한다. 요청마다 `new MongoClient(...).connect()`
+를 하면 커넥션이 폭발한다. 모듈 전역에 두고 재사용하되,
+**연결에 실패한 클라이언트를 전역에 남기면 안 된다** — 다음 요청이 죽은 연결을
+그대로 물게 된다.
+
+```js
+const c = new mod.MongoClient(uri, { maxPoolSize: 10, serverSelectionTimeoutMS: 8000 });
+try { await c.connect(); }
+catch (e) { await c.close().catch(() => {}); throw new Error('MongoDB 에 연결하지 못했습니다 — ' + e.message); }
+mongoClient = c;      // 성공한 뒤에야 전역에 올린다
+```
+
+### 11.25 액션 이름과 액션 인자가 같은 키를 쓰면 안 된다
+
+액션을 `{ k: 'skbuy', k: 'nt' }` 처럼 보내려다 막혔다. 라우팅 키가 `a.k` 인데
+스킬 키도 `a.k` 였기 때문이다. 개조(`a.k`)·파츠(`a.k`)도 같이 겹쳤다.
+
+인자 이름을 나눴다 — 스킬 `a.sk`, 개조 `a.mk`, 지형 `a.ter`, 능력치 `a.stat`.
+라우팅에 쓰는 이름은 예약어처럼 다루는 편이 낫다.
+
 ---
 
 ## 12. 스타일 가이드
@@ -1695,7 +1849,7 @@ node --eval "fetch('https://ggendb.up.railway.app/api/units?lang=EN&page=1&per_p
 
 ### 임무 추가
 
-`src/engine.js` 의 `MISSION` 배열에 항목을 넣는다. 상황실·출격 화면이 자동으로
+`src/rules.mjs` 의 `MISSION` 배열에 항목을 넣는다. 상황실·출격 화면이 자동으로
 순회하므로 UI 수정은 필요 없다.
 
 ```js
@@ -1716,7 +1870,7 @@ node --eval "fetch('https://ggendb.up.railway.app/api/units?lang=EN&page=1&per_p
 
 ### 파일럿 스킬 추가
 
-`src/engine.js` 의 `PSKILL` 에 항목 하나를 더하면 상점·장착 UI·효과 집계가
+`src/rules.mjs` 의 `PSKILL` 에 항목 하나를 더하면 상점·장착 UI·효과 집계가
 모두 이 배열을 순회하므로 다른 곳은 손댈 필요가 없다.
 
 ```js
@@ -1805,7 +1959,7 @@ const wIsAwk = w => (w.at || '').indexOf('특수') >= 0;
 ### 도감·상점 페이지 크기
 
 ```js
-const PAGE_N = 60;   // src/ui.js — 한 페이지에 몇 기를 보여줄지
+const PAGE_N = 60;   // src/client.js — 한 페이지에 몇 기를 보여줄지
 ```
 
 `pager(total, pg, tag)` 가 도감(`bookpg`)과 상점(`shoppg`) 양쪽을 그린다.
@@ -1815,7 +1969,7 @@ const PAGE_N = 60;   // src/ui.js — 한 페이지에 몇 기를 보여줄지
 
 `--resize=<px>` (sharp 필요). 용량 표는 [4.4절](#44-이미지는-왜-분리하는가)에 있다.
 화면 표시 크기는 `src/head.html` 의 네 단계이고, 어느 크기에 썸네일을 쓸지는
-`src/ui.js` 의 `picFor()` 가 정한다.
+`src/client.js` 의 `picFor()` 가 정한다.
 
 ```css
 .ui.s{width:64px;height:56px}     /* 전투판·도감 그리드 — 썸네일 */
@@ -1835,7 +1989,7 @@ const PAGE_N = 60;   // src/ui.js — 한 페이지에 몇 기를 보여줄지
 ### 등급 표기를 되살리려면
 
 `rar` 값은 데이터에 그대로 남아 있다(적 편성·EXP 계산에 쓰인다).
-`src/ui.js` 에 아래를 넣고 원하는 위치에 끼우면 된다.
+`src/client.js` 에 아래를 넣고 원하는 위치에 끼우면 된다.
 
 ```js
 const rtag = r => '<span class="rtag r' + r + '">' + r + '</span>';
@@ -1857,23 +2011,74 @@ const LVUP_PT  = 5;     // 레벨업 1회당
 
 ### 일일 행동력
 
-`src/engine.js` 의 `AP_BASE`(기본 10). 4레벨마다 상한이 1씩 오르는 규칙은
+`src/rules.mjs` 의 `AP_BASE`(기본 10). 4레벨마다 상한이 1씩 오르는 규칙은
 `gainExp()` 안에 있다.
 
 ### 언어 바꾸기
 
 `fetch-roster.mjs` 의 `LANG` 을 `JP`/`TW`/`HK` 로. **한국어는 API가 지원하지 않는다.**
 무장·특성·시리즈는 `src/i18n.mjs` 가 빌드 시점에 옮기고([4.5절](#45-한글화)),
-UI 문자열은 `head.html`·`engine.js`·`ui.js` 에 한글로 하드코딩돼 있다.
+UI 문자열은 `head.html`·`rules.mjs`·`client.js` 에 한글로 하드코딩돼 있다.
 `LANG` 을 바꾸면 사전 키가 안 맞으므로 사전도 함께 갈아야 한다.
 `wIsAwk` 가 `'특수'` 를 문자열로 찾으므로 **속성 사전을 바꾸면 각성 무장 판정도 같이 손봐야 한다.**
 
-### 세이브 호환
+### 세이브 스키마를 바꿀 때
 
-`SAVEKEY` 는 `'gover.world.v5'`. 상태 구조를 바꿨다면 `v5` 로 올려서
-기존 세이브가 깨진 채 로드되지 않게 한다. `load()` 가 `UMAP[id]` 검증과
-누락 필드 보정(`pt`, `sk`, `mod.sct`)을 하므로 로스터만 바뀐 경우는
-없는 기체만 조용히 걸러진다.
+세이브는 서버가 갖고 있고 `SAVEKEY` 는 없어졌다. 대신 **`rules.mjs` 의
+`migrate()` 에 보정을 추가한다.** 저장소에서 꺼낼 때마다 통과하므로
+필드를 더해도 옛 기록이 깨지지 않는다.
+
+```js
+function migrate(o) {
+  ...
+  if (!o.newField) o.newField = 기본값;
+  return o;
+}
+```
+
+`migrate()` 는 **로스터에서 사라진 기체도 걸러낸다.** 남은 기체가 없으면
+`null` 을 돌려주고, 그러면 신규 등록 화면이 뜬다.
+
+호환이 도저히 안 되는 변경이라면 저장소를 통째로 비우는 편이 낫다.
+
+```bash
+rm -rf data/                                   # 파일 저장소
+# MongoDB: db.saves.deleteMany({})
+```
+
+### 서버 액션 추가
+
+`src/actions.mjs` 의 `H` 에 핸들러를 하나 더한다. 클라이언트는
+`act({ k: '이름', ... })` 만 보내면 된다.
+
+```js
+const H = {
+  ...,
+  scrap(g, a) {
+    const v = R.cur();
+    if (g.garage.length <= 1) no('마지막 기체는 해체할 수 없습니다.');
+    ...
+    return { msg: { t: '해체 완료', b: '...' } };
+  }
+};
+```
+
+**인자 이름이 `k` 와 겹치지 않게 할 것** ([§11.25](#1125-액션-이름과-액션-인자가-같은-키를-쓰면-안-된다)).
+그리고 **여기서 `await` 를 쓰면 안 된다** ([§11.22](#1122-모듈-전역-상태를-서버에서-쓰려면-동기가-조건이다)).
+
+### 저장소 백엔드 추가
+
+`src/store.mjs` 가 `{ get, put, del, touch, close }` 다섯 개만 요구한다.
+Redis·Postgres·S3 무엇이든 이 모양만 채우면 나머지는 손댈 것이 없다.
+
+```js
+async function redisStore(url) {
+  ...
+  return { kind:'redis', where:url,
+    async get(pid){ ... }, async put(pid,g){ ... },
+    async del(pid){ ... }, async touch(){}, async close(){} };
+}
+```
 
 ---
 
@@ -1891,7 +2096,7 @@ UI 문자열은 `head.html`·`engine.js`·`ui.js` 에 한글로 하드코딩돼 
 
 ## 부록 — 함수 색인
 
-**engine.js — 상태 · 파생**
+**rules.mjs — 상태 · 파생** (서버·클라 공용)
 
 | 함수 | 역할 |
 |---|---|
@@ -1912,8 +2117,12 @@ UI 문자열은 `head.html`·`engine.js`·`ui.js` 에 한글로 하드코딩돼 
 | `orderPrice(B)` / `orderDays(B)` / `rankReqOf(B)` / `rankIdx()` | 상점 발주 조건 |
 | `statTotal()` | 캐릭터 능력치 합계 — 적 능력 산출의 기준 |
 | `gainExp(n)` | EXP 가산 · 레벨업 · 능력 포인트 지급 |
+| `initRules(units)` | 로스터 주입 — `UNITS`·`UMAP`·`SERIES_LIST`·`POW_SORTED` 구성 |
+| `setState(g)` / `getState()` | 처리 중인 세이브 교체 · 조회 |
+| `migrate(g)` | 저장소에서 꺼낸 세이브의 누락 필드 보정 · 무효 판정 |
+| `newGame(nm, st, id)` | 새 세이브 생성 (저장은 하지 않는다) |
 
-**engine.js — 전투**
+**rules.mjs — 전투** (서버 전용 · 완전 동기)
 
 | 함수 | 역할 |
 |---|---|
@@ -1934,11 +2143,11 @@ UI 문자열은 `head.html`·`engine.js`·`ui.js` 에 한글로 하드코딩돼 
 | `critNeed(A,D,w)` | 크리티컬 필요 마진 |
 | `calcDmg(A,D,w)` | 피해량 |
 | `chooseWep(A,D,dist)` | 기대 피해 최대 무장 선택 |
-| `runBattle(ms,tac,ter)` | 전투 전체 진행 + 정산 (async) |
-| `paintDuel` / `paintBoard` / `bl` | 교전 표시 · 상황판 · 로그 |
+| `resolveBattle(ms,tac,ter)` | 전투 전체 계산 + 정산 → `{ cast, ev, res }` (**동기**) |
+
 | `oppP(adv)` | 2d6 대항판정 명중 확률표 |
 
-**ui.js**
+**client.js** (브라우저 전용)
 
 | 함수 | 역할 |
 |---|---|
@@ -1954,5 +2163,28 @@ UI 문자열은 `head.html`·`engine.js`·`ui.js` 에 한글로 하드코딩돼 
 | `allocTable` / `bindAlloc` (파일럿) · `uAlloc` 계열 (기체) | 두 종류의 포인트 배분 |
 | `awkLocked()` | 올드타입 장착 시 각성 잠금 |
 | `bindMain()` | 메인 프레임 이벤트 위임 |
-| `nextDay()` | 일자 진행 + 이벤트 + 암시장 초기화 |
-| `doTrain(k)` | 훈련 판정 |
+| `act(a)` | 액션을 서버로 보내고 결과를 반영 (거절 사유도 화면에) |
+| `post(url,b)` / `getJSON(url)` / `adopt(j)` | 통신 · 응답 반영 |
+| `playBattle(b)` | 서버가 보낸 이벤트를 원래 속도로 재생 |
+| `paintDuel` / `paintBoard` / `bl` | 교전 표시 · 상황판 · 로그 |
+| `viewCode()` | 이어하기 코드 화면 |
+| `nextDay()` | `act({k:'nextday'})` 호출 |
+
+**actions.mjs** (서버 전용)
+
+| 함수 | 역할 |
+|---|---|
+| `applyAction(g, a)` | 액션 라우팅 + 상태 교체/복원. 거절은 `Reject` 로 던진다 |
+| `H.*` | 액션별 핸들러 20종 (`new` `train` `alloc` `ualloc` `skbuy` `skeq` `skuneq` `sortie` `repair` `mod` `wl` `partbuy` `partfit` `partoff` `mktbuy` `order` `ordercancel` `ride` `sell` `nextday`) |
+| `no(msg)` | 거절 — 서버가 400 과 함께 이 문장을 돌려준다 |
+| `intMap(src, keys)` | 클라이언트가 보낸 정수 맵을 화이트리스트로 걸러 받는다 |
+
+**api.mjs · store.mjs · server.mjs** (서버 전용)
+
+| 함수 | 역할 |
+|---|---|
+| `handleApi(req,res,path)` | `/api/state` `/api/act` `/api/login` `/api/reset` |
+| `readPid` / `setCookie` / `newPid` | 플레이어 코드 (CSPRNG 24자리 16진수) |
+| `readBody(req)` | JSON 본문 파싱 · 64KB 상한 |
+| `openStore()` | `MONGODB_URI` 유무로 mongo / file 선택 · 연결 캐시 |
+| `serveStatic` | `docs/` 정적 서빙 · 이미지에 1년 불변 캐시 |
