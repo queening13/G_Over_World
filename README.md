@@ -47,7 +47,7 @@ npm install && node src/fetch-roster.mjs && node build.mjs && node server.mjs
 ## 1. 5분 재현
 
 빈 디렉터리에 `package.json` `build.mjs` `server.mjs` `vercel.json`,
-`api/index.mjs`, `test/`, 그리고 `src/` 의 일곱 파일
+`api/[...path].mjs`, `test/`, 그리고 `src/` 의 일곱 파일
 (`head.html` `rules.mjs` `actions.mjs` `api.mjs` `store.mjs` `client.js`
 `i18n.mjs` `fetch-roster.mjs`)을 놓은 뒤:
 
@@ -108,7 +108,8 @@ MongoDB 를 안 쓸 거면 `npm install --omit=optional` 없이도 무방하다 
 ├── package.json           npm start / build / fetch / sim / test
 ├── vercel.json            Vercel 배포 설정 (함수 라우팅·캐시 헤더)
 ├── api/
-│   └── index.mjs          Vercel 서버리스 진입점 (src/api.mjs 재사용)
+│   └── [...path].mjs      Vercel 서버리스 진입점 — 파일명이 곧 /api/* 라우트
+├── .env.example           환경변수 서식 (.env 로 복사해서 쓴다)
 ├── test/
 │   ├── sim.mjs            밸런스 시뮬레이터 (서버 없이 전투만 대량 실행)
 │   └── e2e.mjs            API 종단 점검 (정상 동작 + 변조 요청 거절)
@@ -480,12 +481,19 @@ node build.mjs      # 또는 npm run build
 ```bash
 npm install
 node build.mjs
-node server.mjs            # 또는 npm start  →  http://localhost:8788/
+node server.mjs                       # 또는 npm start  →  http://localhost:8788/
 PORT=3000 node server.mjs
+node --env-file=.env server.mjs       # .env 에서 환경변수를 읽는다 (Node 20.6+)
 ```
 
 세이브는 `data/<플레이어코드>.json` 에 쌓인다. 임시 파일에 쓰고 `rename` 하므로
 쓰다 죽어도 세이브가 반쯤 남지 않는다.
+
+`.env.example` 을 `.env` 로 복사해 쓰면 된다. `.env` 는 `.gitignore` 에 있다.
+
+```bash
+cp .env.example .env
+```
 
 > **`docs/index.html` 을 브라우저로 직접 열면 안 된다.** v4 까지는 됐지만
 > 이제 `/api/*` 가 필요하다. 반드시 서버를 거칠 것.
@@ -497,28 +505,99 @@ node test/e2e.mjs          # 서버를 띄운 상태에서. 정상 동작 + 변�
 node test/sim.mjs          # 밸런스 시뮬레이터 (서버 불필요)
 ```
 
-### 6.2 MongoDB 로 옮기기
+### 6.2 MongoDB Atlas 붙이기
 
-MongoDB Atlas **무료 티어(M0, 512MB)** 면 충분하다. 세이브 하나가 1KB 안팎이라
-5명이 몇 년을 놀아도 남는다.
+무료 티어 **M0(512MB)** 면 충분하다. 세이브 하나가 **0.7KB** 라 5인이 몇 년을
+놀아도 남는다. 카드 등록도 필요 없다.
 
-1. [cloud.mongodb.com](https://cloud.mongodb.com) 에서 M0 클러스터 생성
-2. **Database Access** 에서 사용자 하나 추가
-3. **Network Access** 에서 접속 IP 허용
-   (Vercel 처럼 IP 가 고정되지 않는 곳은 `0.0.0.0/0` — 계정·비밀번호로만 막힌다)
-4. 연결 문자열을 환경변수로 넘긴다
+#### 6.2.1 클러스터 만들기
 
-```bash
-MONGODB_URI="mongodb+srv://사용자:비밀번호@클러스터.mongodb.net/?retryWrites=true&w=majority" \
-  node server.mjs
+1. [cloud.mongodb.com](https://cloud.mongodb.com) 가입 / 로그인
+2. 프로젝트를 하나 만든다 (이름은 아무거나 — `G-Over World`)
+3. **Create / Build a Database** → 요금제에서 **M0 (Free)** 선택
+4. 클라우드 제공자와 리전을 고른다
+   * 한국에서 쓸 거면 **AWS · Seoul (ap-northeast-2)**
+   * Vercel 에 올릴 거면 Vercel 함수 리전과 가까운 쪽이 지연이 적다
+5. 클러스터 이름을 정하고 생성 (1~3분 걸린다)
+
+#### 6.2.2 접속 계정 만들기
+
+**Database Access → Add New Database User**
+
+| 항목 | 값 |
+|---|---|
+| 인증 방식 | Password |
+| 사용자명 | 예 `gover` |
+| 비밀번호 | **Autogenerate 를 눌러 만든 값을 그대로 쓰는 편이 낫다** |
+| 권한 | `Read and write to any database` (좁히려면 `gover` DB 에만) |
+
+> **비밀번호에 특수문자가 있으면 연결 문자열에서 퍼센트 인코딩해야 한다.**
+> 이걸 빠뜨려서 인증 실패가 나는 경우가 가장 흔하다.
+>
+> | 문자 | `@` | `#` | `/` | `:` | `?` | `&` | `%` |
+> |---|---|---|---|---|---|---|---|
+> | 인코딩 | `%40` | `%23` | `%2F` | `%3A` | `%3F` | `%26` | `%25` |
+>
+> 애초에 특수문자 없는 비밀번호를 쓰면 이 문제를 피할 수 있다.
+
+#### 6.2.3 접속 허용 IP
+
+**Network Access → Add IP Address**
+
+* 로컬에서만 쓸 거면 **Add Current IP Address**
+* **Vercel 에 올릴 거면 `0.0.0.0/0` (Allow Access from Anywhere)**
+  — Vercel Hobby 는 함수 IP 가 고정되지 않는다. 계정·비밀번호로만 막히는
+  상태가 되므로 **비밀번호를 길게 쓸 것.**
+
+#### 6.2.4 연결 문자열
+
+**Database → Connect → Drivers → Node.js** 에서 문자열을 복사한다.
+
+```
+mongodb+srv://gover:<db_password>@cluster0.abcde.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
 ```
 
-기동 로그에 `세이브 저장소 : mongo (gover.saves)` 가 뜨면 붙은 것이다.
-연결에 실패하면 이유를 한 줄로 찍고 종료한다.
+`<db_password>` 를 실제 비밀번호로 바꾼다. `appName` 은 남겨도 무방하다.
 
-| 환경변수 | 기본값 | 설명 |
+#### 6.2.5 로컬에서 먼저 확인한다 — 이 단계를 건너뛰지 말 것
+
+**Vercel 에 올리기 전에 로컬에서 Atlas 로 한 판을 돌려 본다.** 그래야 나중에
+실패했을 때 원인이 Atlas 쪽인지 Vercel 쪽인지 바로 갈린다.
+
+```bash
+cp .env.example .env         # 그리고 MONGODB_URI 를 채운다
+node --env-file=.env server.mjs
+```
+
+기동 로그가 이렇게 나오면 붙은 것이다.
+
+```
+G-Over World — http://localhost:8788
+  세이브 저장소 : mongo (gover.saves)
+```
+
+이어서 다른 터미널에서:
+
+```bash
+node test/e2e.mjs
+```
+
+**21항목이 전부 `OK` 면 Atlas 설정은 끝났다.** 저장까지 실제로 오갔다는 뜻이다.
+Atlas 화면의 **Browse Collections** 에서 `gover.saves` 에 문서가 생긴 것도
+눈으로 확인할 수 있다.
+
+| 증상 | 원인 |
+|---|---|
+| `connect ECONNREFUSED` / `querySrv ENOTFOUND` | 문자열 오타, 클러스터 주소 잘못 |
+| `bad auth : authentication failed` | 비밀번호 틀림, **또는 퍼센트 인코딩 누락** |
+| `Server selection timed out` | Network Access 에 내 IP 가 없음 |
+| `mongodb 드라이버가 없습니다` | `npm install` 을 안 했음 |
+
+#### 6.2.6 환경변수 정리
+
+| 변수 | 기본값 | 설명 |
 |---|---|---|
-| `MONGODB_URI` | (없음) | 없으면 파일 저장소 |
+| `MONGODB_URI` | (없음) | 없으면 `data/` 에 파일로 저장 |
 | `MONGODB_DB` | `gover` | 데이터베이스 이름 |
 | `MONGODB_COLLECTION` | `saves` | 컬렉션 이름 |
 | `SAVE_DIR` | `./data` | 파일 저장소 경로 |
@@ -526,28 +605,106 @@ MONGODB_URI="mongodb+srv://사용자:비밀번호@클러스터.mongodb.net/?retr
 
 문서 모양은 `{ _id: 플레이어코드, g: 세이브, updated, created }` 다.
 **연결은 모듈 전역에 캐시한다** — 서버리스에서 요청마다 새로 연결하면
-커넥션이 폭발한다.
+커넥션이 폭발한다 ([§11.24](#1124-서버리스에서-db-클라이언트는-모듈-전역에-캐시할-것)).
+
+---
 
 ### 6.3 Vercel 배포
 
+#### 6.3.1 구성
+
 ```
-vercel.json    /api/* → api/index.mjs (서버리스 함수)
-               나머지 → docs/ 정적 서빙
+vercel.json
+  buildCommand      node build.mjs        docs/index.html · docs/app.js 재생성
+  installCommand    npm install --omit=dev  mongodb 만 설치(sharp 제외)
+  outputDirectory   docs                  정적 자산
+  functions         api/[...path].mjs     /api/* 전부를 받는다
 ```
 
-1. [vercel.com/new](https://vercel.com/new) → 저장소 선택
-2. **Environment Variables** 에 `MONGODB_URI` 추가 — **이게 없으면 동작하지 않는다.**
-   Vercel 의 파일 시스템은 읽기 전용이라 파일 저장소를 쓸 수 없다.
-   (빠뜨리면 API 가 그 사실을 한국어로 알려 준다.)
-3. Deploy
+`api/[...path].mjs` 는 **파일명 자체가 라우트다.** Vercel 의 catch-all 규칙이라
+`rewrites` 를 따로 걸 필요가 없다. `includeFiles` 가 `src/roster.json` 을 함수
+번들에 같이 넣는다 — 이게 빠지면 함수가 로스터를 못 읽어 500 이 난다.
 
-`vercel.json` 의 `functions.includeFiles` 가 `src/roster.json` 을 함수 번들에
-같이 넣는다. 이게 없으면 함수가 로스터를 못 읽어 500 이 난다.
+#### 6.3.2 순서
 
-> **검증 범위를 밝혀 둔다.** 파일 저장소 경로와 MongoDB **연결 실패** 경로는
-> 실제로 돌려 확인했지만, 살아 있는 Atlas 클러스터에 붙는 것과 Vercel 배포는
-> 연결 문자열이 없어 확인하지 못했다. 저장소 어댑터를 파일/Mongo 로 나눠 둔 것도
-> 그래서다 — 전 기능을 파일 백엔드로 검증했고, Mongo 는 같은 인터페이스만 채운다.
+1. 커밋한 것을 GitHub 에 올린다 (`git push`)
+2. [vercel.com/new](https://vercel.com/new) → **Import Git Repository** → 저장소 선택
+3. **Framework Preset: `Other`**
+   Build / Output 설정은 **건드리지 않는다** — `vercel.json` 이 이미 지정한다
+4. **Environment Variables** 를 펼쳐 `MONGODB_URI` 를 추가한다
+
+   | Key | Value | Environments |
+   |---|---|---|
+   | `MONGODB_URI` | 6.2.4 에서 만든 문자열 | Production · Preview · Development 전부 |
+
+   > **이걸 빠뜨리면 게임이 뜨긴 하는데 아무것도 안 된다.** Vercel 의 파일
+   > 시스템은 읽기 전용이라 파일 저장소를 쓸 수 없다. 빠뜨렸을 때는 API 가
+   > 그 사실을 한국어로 알려 준다.
+5. **Deploy**. 첫 배포는 이미지 2488장(133MB) 때문에 몇 분 걸린다.
+
+#### 6.3.3 배포 후 확인
+
+```bash
+# 1) API 가 살아 있는가 — 이게 제일 중요하다
+curl -s https://<프로젝트>.vercel.app/api/state
+# → {"pid":"...","g":null,"store":"mongo"}
+
+# 2) 정적 자산과 캐시 헤더
+curl -sI https://<프로젝트>.vercel.app/app.js | grep -i cache-control
+curl -sI https://<프로젝트>.vercel.app/img/1001000150.webp | grep -i cache-control
+# → public, max-age=31536000, immutable
+
+# 3) 종단 점검 21항목을 배포본에 그대로 돌린다
+BASE=https://<프로젝트>.vercel.app node test/e2e.mjs
+```
+
+**3번이 전부 `OK` 면 배포가 끝난 것이다.**
+
+#### 6.3.4 안 될 때
+
+| 증상 | 원인 / 조치 |
+|---|---|
+| `/api/state` 가 **404** | 함수가 안 잡혔다. `api/[...path].mjs` 가 저장소에 올라갔는지, `vercel.json` 의 `functions` 키 이름이 파일 경로와 정확히 같은지 확인 |
+| **500** + `MONGODB_URI 가 설정되지 않았습니다` | 환경변수 누락. **추가한 뒤에는 반드시 재배포해야 한다** (Deployments → ⋯ → Redeploy). 이미 뜬 배포에는 소급 적용되지 않는다 |
+| **500** + 그 외 | Vercel **Logs** 탭을 본다. `roster.json` 을 못 찾으면 `includeFiles` 문제, 인증 실패면 Atlas 문제 |
+| 화면은 뜨는데 `서버 연결 실패` | `/api/state` 를 직접 열어 본다. 위 세 줄 중 하나로 갈린다 |
+| Atlas 에서 `Server selection timed out` | Network Access 에 `0.0.0.0/0` 이 없다 |
+
+이후 `git push` 할 때마다 자동 재배포되고, 브랜치마다 프리뷰 URL 이 따로 생긴다.
+**프리뷰도 같은 `MONGODB_URI` 를 쓰면 세이브를 공유한다** — 나누고 싶으면
+Preview 환경에만 다른 `MONGODB_DB` 를 지정한다.
+
+#### 6.3.5 검증 범위
+
+정직하게 적어 둔다. **파일 저장소 경로와 MongoDB 연결 실패 경로는 실제로
+돌려 확인했지만, 살아 있는 Atlas 클러스터 연결과 Vercel 배포는 연결 문자열이
+없어 확인하지 못했다.** 저장소를 어댑터로 나눈 것도 그래서다 — 전 기능을
+파일 백엔드로 검증했고, Mongo 는 같은 인터페이스만 채운다.
+
+그래서 **6.2.5(로컬 Mongo 검증)를 반드시 먼저 하라**고 적었다. 거기까지
+통과하면 남은 변수는 Vercel 라우팅 하나뿐이고, 그건 6.3.3 의 첫 줄로 판별된다.
+
+---
+
+### 6.3-b 다른 곳에 올리기 (Render · Fly.io · VPS)
+
+서버리스가 아니라 상시 프로세스라면 **MongoDB 없이 파일 저장소로도 된다.**
+
+```bash
+git clone <저장소> && cd G_Over_World
+npm install
+node build.mjs
+PORT=8080 node server.mjs
+```
+
+* 시작 명령 : `npm start`
+* 필요한 것 : Node 20 이상, 디스크 약 150MB
+* 세이브 : `data/` — **컨테이너를 재생성하면 날아가므로** 볼륨을 붙이거나
+  `MONGODB_URI` 를 쓴다
+* 리버스 프록시(nginx 등) 뒤에 둘 거면 `/img` `/th` 는 프록시가 직접
+  서빙하게 하는 편이 낫다 (133MB 를 Node 가 계속 읽을 이유가 없다)
+
+---
 
 ### 6.4 GitHub Pages 는 더 이상 쓸 수 없다
 

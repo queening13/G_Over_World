@@ -3,18 +3,13 @@
   "outputDirectory": "docs",
   "buildCommand": "node build.mjs",
   "installCommand": "npm install --omit=dev",
-  "cleanUrls": true,
-  "trailingSlash": false,
   "functions": {
-    "api/index.mjs": {
+    "api/[...path].mjs": {
       "includeFiles": "src/roster.json",
       "memory": 1024,
       "maxDuration": 15
     }
   },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index.mjs" }
-  ],
   "headers": [
     {
       "source": "/(img|th)/(.*)",
